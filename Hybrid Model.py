@@ -647,7 +647,7 @@ def app():
             cycle_cost_eur_per_mwh=cycle_cost,
             charge_quantile=charge_quantile,
             discharge_quantile=discharge_quantile,
-            max_cycles_per_day=max_cycles,,
+            max_cycles_per_day=max_cycles,
         )
 
         with st.spinner("Optimisation économique annuelle en cours..."):
