@@ -44,27 +44,36 @@ def _validate_array_length(arr: np.ndarray, name: str, expected_len: int = HOURS
 def _read_single_column_csv(uploaded_file, expected_len: int = HOURS_PER_YEAR) -> np.ndarray:
     if uploaded_file is None:
         raise ValueError("Aucun fichier CSV fourni.")
-    # Lecture robuste : accepte CSV simple, avec séparateur virgule ou point-virgule
+
     try:
         uploaded_file.seek(0)
     except Exception:
         pass
+
     try:
-        df = pd.read_csv(uploaded_file, sep=None, engine="python")
+        df = pd.read_csv(uploaded_file, sep=None, engine="python", header=None)
     except Exception:
         try:
             uploaded_file.seek(0)
         except Exception:
             pass
-        df = pd.read_csv(uploaded_file)
+        df = pd.read_csv(uploaded_file, header=None)
 
     if df.shape[1] == 0:
         raise ValueError("Le CSV est vide.")
 
     first_col = df.iloc[:, 0].astype(str).str.strip()
-    # Accepte les décimales avec virgule
     first_col = first_col.str.replace(",", ".", regex=False)
-    series = pd.to_numeric(first_col, errors="coerce").dropna()
+
+    series = pd.to_numeric(first_col, errors="coerce")
+
+    if series.isna().any():
+        bad_rows = series[series.isna()].index[:5].tolist()
+        raise ValueError(
+            f"Le CSV contient des valeurs non numériques dans la première colonne. "
+            f"Lignes problématiques (index pandas): {bad_rows}"
+        )
+
     if len(series) != expected_len:
         raise ValueError(
             f"Le CSV doit contenir exactement {expected_len} lignes numériques dans la première colonne. "
@@ -74,6 +83,7 @@ def _read_single_column_csv(uploaded_file, expected_len: int = HOURS_PER_YEAR) -
     arr = series.to_numpy(dtype=float)
     if np.any(~np.isfinite(arr)):
         raise ValueError("Le CSV contient des valeurs non finies.")
+
     return arr
     
 def _make_flat_curve(value: float, expected_len: int = HOURS_PER_YEAR) -> np.ndarray:
