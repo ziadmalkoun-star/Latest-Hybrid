@@ -50,37 +50,50 @@ def _read_single_column_csv(uploaded_file, expected_len: int = HOURS_PER_YEAR) -
     except Exception:
         pass
 
-    try:
-        df = pd.read_csv(uploaded_file, sep=None, engine="python", header=None)
-    except Exception:
-        try:
-            uploaded_file.seek(0)
-        except Exception:
-            pass
-        df = pd.read_csv(uploaded_file, header=None)
+    raw = uploaded_file.read()
+    if isinstance(raw, bytes):
+        text = raw.decode("utf-8-sig", errors="replace")
+    else:
+        text = str(raw)
 
-    if df.shape[1] == 0:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+
+    if not lines:
         raise ValueError("Le CSV est vide.")
 
-    first_col = df.iloc[:, 0].astype(str).str.strip()
-    first_col = first_col.str.replace(",", ".", regex=False)
+    values = []
+    bad_rows = []
 
-    series = pd.to_numeric(first_col, errors="coerce")
+    for i, line in enumerate(lines):
+        # accepte :
+        # 63,33
+        # 63.33
+        # "63,33"
+        cleaned = line.strip().strip('"').strip("'").replace(",", ".")
 
-    if series.isna().any():
-        bad_rows = series[series.isna()].index[:5].tolist()
+        try:
+            values.append(float(cleaned))
+        except ValueError:
+            bad_rows.append(i)
+
+    # tolère un header unique en première ligne
+    if len(bad_rows) == 1 and bad_rows[0] == 0 and len(values) == expected_len:
+        return np.asarray(values, dtype=float)
+
+    if bad_rows:
         raise ValueError(
             f"Le CSV contient des valeurs non numériques dans la première colonne. "
-            f"Lignes problématiques (index pandas): {bad_rows}"
+            f"Lignes problématiques: {bad_rows[:10]}"
         )
 
-    if len(series) != expected_len:
+    if len(values) != expected_len:
         raise ValueError(
-            f"Le CSV doit contenir exactement {expected_len} lignes numériques dans la première colonne. "
-            f"Reçu: {len(series)}."
+            f"Le CSV doit contenir exactement {expected_len} lignes numériques. "
+            f"Reçu: {len(values)}."
         )
 
-    arr = series.to_numpy(dtype=float)
+    arr = np.asarray(values, dtype=float)
+
     if np.any(~np.isfinite(arr)):
         raise ValueError("Le CSV contient des valeurs non finies.")
 
