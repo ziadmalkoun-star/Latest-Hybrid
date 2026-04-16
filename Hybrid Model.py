@@ -31,7 +31,7 @@ class SimulationInputs:
     cycle_cost_eur_per_mwh: float
     charge_quantile: float
     discharge_quantile: float
-    max_cycles_per_year: float
+    max_cycles_per_day: float
 
 def _validate_array_length(arr: np.ndarray, name: str, expected_len: int = HOURS_PER_YEAR) -> np.ndarray:
     arr = np.asarray(arr, dtype=float).reshape(-1)
@@ -166,7 +166,7 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
     grid_buy = _validate_array_length(inputs.grid_buy_price, "Le prix d'achat réseau")
     charge_threshold = np.percentile(grid_buy, inputs.charge_quantile)
     discharge_threshold = np.percentile(batt_sell, inputs.discharge_quantile)
-    max_total_discharge = inputs.max_cycles_per_year * inputs.batt_energy_mwh
+    max_total_discharge = inputs.max_cycles_per_day * 365.0 * inputs.batt_energy_mwh
 
     if np.any(~np.isfinite(pv)) or np.any(~np.isfinite(pv_price)) or np.any(~np.isfinite(batt_sell)) or np.any(~np.isfinite(grid_buy)):
         raise ValueError("Une ou plusieurs séries contiennent des valeurs invalides.")
@@ -471,8 +471,8 @@ def app():
         grid_export_limit_mw = st.number_input("Limite injection réseau (MW)", min_value=0.0, value=pv_dc_mw, step=1.0)
         cycle_cost = st.number_input("Coût de cycle batterie (EUR/MWh)", value=5.0)
         charge_quantile = st.slider("Quantile charge (%)", 0, 50, 20)
-        discharge_quantile = st.slider("Quantile décharge (%)", 0, 50, 20)
-        max_cycles = st.number_input("Cycles max / an", value=300.0)
+        discharge_quantile = st.slider("Quantile décharge (%)", 0, 100, 80)
+        max_cycles = st.number_input("Cycles max / jour", min_value=0.0, value=1.0, step=0.1)
 
     with col2:
         pv_losses_pct = st.number_input("Pertes système PV (%)", min_value=0.0, max_value=100.0, value=8.0, step=0.5)
@@ -647,7 +647,7 @@ def app():
             cycle_cost_eur_per_mwh=cycle_cost,
             charge_quantile=charge_quantile,
             discharge_quantile=discharge_quantile,
-            max_cycles_per_year=max_cycles,
+            max_cycles_per_day=max_cycles,,
         )
 
         with st.spinner("Optimisation économique annuelle en cours..."):
@@ -740,22 +740,36 @@ def app():
 
             fig, ax1 = plt.subplots(figsize=(12, 5))
 
-            # --- Aires empilées (flux sortants vers réseau) ---
-            ax1.stackplot(
+            bar_width = 0.03  # ~45 min in matplotlib date units
+            
+            # PV direct stays as area if you want
+            ax1.plot(df["datetime"], df["pv_direct_mwh"], label="PV → Réseau", linewidth=1.8)
+            
+            # Battery discharge as positive bars
+            ax1.bar(
                 df["datetime"],
-                df["pv_direct_mwh"],
                 df["battery_discharge_mwh"],
-                labels=["PV → Réseau", "Batterie → Réseau"],
+                width=bar_width,
+                label="Batterie → Réseau",
                 alpha=0.8
             )
-
-            # --- Aires négatives (charges batterie) ---
-            ax1.stackplot(
+            
+            # Battery charging as negative bars
+            ax1.bar(
                 df["datetime"],
                 -df["pv_to_battery_mwh"],
+                width=bar_width,
+                label="PV → Batterie",
+                alpha=0.6
+            )
+            
+            ax1.bar(
+                df["datetime"],
                 -df["grid_charge_mwh"],
-                labels=["PV → Batterie", "Réseau → Batterie"],
-                alpha=0.5
+                width=bar_width,
+                bottom=-df["pv_to_battery_mwh"],
+                label="Réseau → Batterie",
+                alpha=0.6
             )
 
             ax1.axhline(0, linewidth=1)  # ligne zéro
