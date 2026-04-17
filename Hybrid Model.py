@@ -763,7 +763,7 @@ def app():
                 -df["pv_to_battery_mwh"],
                 width=bar_width,
                 label="PV → Batterie",
-                alpha=0.6
+                alpha=0.6, color='orange'
             )
             
             ax1.bar(
