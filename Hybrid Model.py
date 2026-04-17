@@ -673,7 +673,33 @@ def app():
             "battery_sale_revenue_eur": result["batt_sale_revenue"],
             "grid_charge_cost_eur": result["grid_charge_cost"],
         })
-
+        # ---------------- DEBUG BLOCK HERE ----------------
+        debug = hourly_df[
+            (hourly_df["datetime"] >= pd.Timestamp(f"{DEFAULT_YEAR}-06-01 00:00:00")) &
+            (hourly_df["datetime"] < pd.Timestamp(f"{DEFAULT_YEAR}-06-04 00:00:00"))
+        ].copy()
+        
+        charge_threshold_val = np.percentile(grid_buy_curve, charge_quantile)
+        discharge_threshold_val = np.percentile(batt_sell_curve, discharge_quantile)
+        
+        debug["charge_allowed"] = debug["grid_buy_price_eur_per_mwh"] <= charge_threshold_val
+        debug["discharge_allowed"] = debug["battery_sell_price_eur_per_mwh"] >= discharge_threshold_val
+        
+        st.subheader("Debug dispatch (3 premiers jours de juin)")
+        st.dataframe(
+            debug[[
+                "datetime",
+                "battery_soc_mwh_end",
+                "grid_buy_price_eur_per_mwh",
+                "battery_sell_price_eur_per_mwh",
+                "grid_charge_mwh",
+                "battery_discharge_mwh",
+                "charge_allowed",
+                "discharge_allowed",
+            ]],
+            use_container_width=True,
+        )
+        
         excel_bytes = to_excel_bytes(summary_df, monthly_df, hourly_df)
 
         st.success("Simulation terminée.")
