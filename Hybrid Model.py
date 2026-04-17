@@ -33,6 +33,7 @@ class SimulationInputs:
     charge_quantile: float
     discharge_quantile: float
     max_cycles_per_day: float
+    
 
 def _validate_array_length(arr: np.ndarray, name: str, expected_len: int = HOURS_PER_YEAR) -> np.ndarray:
     arr = np.asarray(arr, dtype=float).reshape(-1)
