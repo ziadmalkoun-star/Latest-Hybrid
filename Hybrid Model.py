@@ -34,7 +34,6 @@ class SimulationInputs:
     discharge_quantile: float
     max_cycles_per_day: float
     min_spread_arbitrage_eur_per_mwh: float
-    cost_steps: int
 
 def _validate_array_length(arr: np.ndarray, name: str, expected_len: int = HOURS_PER_YEAR) -> np.ndarray:
     arr = np.asarray(arr, dtype=float).reshape(-1)
@@ -167,6 +166,25 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
     pv_price = _validate_array_length(inputs.pv_price, "Le prix PV")
     batt_sell = _validate_array_length(inputs.batt_sell_price, "Le prix de vente batterie")
     grid_buy = _validate_array_length(inputs.grid_buy_price, "Le prix d'achat réseau")
+   # Thresholds computed per day
+    idx = pd.date_range(f"{DEFAULT_YEAR}-01-01 00:00:00", periods=HOURS_PER_YEAR, freq="h")
+    
+    df_thresholds = pd.DataFrame({
+        "datetime": idx,
+        "grid_buy": grid_buy,
+        "batt_sell": batt_sell,
+    })
+    df_thresholds["day"] = df_thresholds["datetime"].dt.date
+    
+    charge_threshold_series = df_thresholds.groupby("day")["grid_buy"].transform(
+        lambda x: np.percentile(x, inputs.charge_quantile)
+    ).to_numpy()
+    
+    discharge_threshold_series = df_thresholds.groupby("day")["batt_sell"].transform(
+        lambda x: np.percentile(x, inputs.discharge_quantile)
+    ).to_numpy()
+    
+    max_total_discharge = inputs.max_cycles_per_day * 365.0 * inputs.batt_energy_mwh
 
     if np.any(~np.isfinite(pv)) or np.any(~np.isfinite(pv_price)) or np.any(~np.isfinite(batt_sell)) or np.any(~np.isfinite(grid_buy)):
         raise ValueError("Une ou plusieurs séries contiennent des valeurs invalides.")
@@ -182,53 +200,25 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
         raise ValueError("Le SOC initial ne peut pas dépasser la capacité batterie.")
     if inputs.final_soc_mwh > inputs.batt_energy_mwh:
         raise ValueError("Le SOC final ne peut pas dépasser la capacité batterie.")
-
+        
     T = len(pv)
+
     if T != HOURS_PER_YEAR:
         raise ValueError("Toutes les séries doivent contenir 8760 heures.")
 
-    idx = pd.date_range(f"{DEFAULT_YEAR}-01-01 00:00:00", periods=HOURS_PER_YEAR, freq="h")
-    df_thresholds = pd.DataFrame({
-        "datetime": idx,
-        "grid_buy": grid_buy,
-        "batt_sell": batt_sell,
-    })
-    df_thresholds["day"] = df_thresholds["datetime"].dt.date
-
-    charge_threshold_series = df_thresholds.groupby("day")["grid_buy"].transform(
-        lambda x: np.percentile(x, inputs.charge_quantile)
-    ).to_numpy()
-
-    discharge_threshold_series = df_thresholds.groupby("day")["batt_sell"].transform(
-        lambda x: np.percentile(x, inputs.discharge_quantile)
-    ).to_numpy()
-
     soc_steps = int(max(21, inputs.soc_steps))
     soc_grid = np.linspace(0.0, inputs.batt_energy_mwh, soc_steps)
+    cycle_budget = max_total_discharge
 
-    # Cost grid for average stored energy acquisition price
-    price_min = float(min(np.min(grid_buy), np.min(pv_price), np.min(batt_sell)))
-    price_max = float(max(np.max(grid_buy), np.max(pv_price), np.max(batt_sell)))
-    margin = 50.0
-    cost_grid = np.linspace(price_min - margin, price_max + margin, max(11, inputs.cost_steps))
-    cost_steps = len(cost_grid)
-
-    def nearest_soc_index(value: float) -> int:
+    def nearest_state_index(value: float) -> int:
         value = min(max(value, 0.0), inputs.batt_energy_mwh)
         return int(np.argmin(np.abs(soc_grid - value)))
 
-    def nearest_cost_index(value: float) -> int:
-        value = min(max(value, cost_grid[0]), cost_grid[-1])
-        return int(np.argmin(np.abs(cost_grid - value)))
+    init_idx = nearest_state_index(inputs.initial_soc_mwh)
+    final_idx = nearest_state_index(inputs.final_soc_mwh)
 
-    init_soc_idx = nearest_soc_index(inputs.initial_soc_mwh)
-    final_soc_idx = nearest_soc_index(inputs.final_soc_mwh)
-
-    # Assume empty battery cost basis = 0 when initial SOC = 0
-    init_cost_value = 0.0
-    init_cost_idx = nearest_cost_index(init_cost_value)
-
-    DT = 1.0
+    # Variation max de SOC sur 1h
+    DT = 1.0  # heure
     charge_soc_max = inputs.batt_power_mw * inputs.eta_charge * DT
     discharge_soc_max = inputs.batt_power_mw * DT / inputs.eta_discharge
 
@@ -239,136 +229,115 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
         transitions.append(np.arange(j_min, j_max + 1, dtype=int))
 
     neg_inf = -1e30
+    value_next = np.full(soc_steps, neg_inf, dtype=float)
+    value_next[final_idx] = 0.0
+    policy_next = np.full((T, soc_steps), -1, dtype=np.int16 if soc_steps < 32000 else np.int32)
 
-    # value_next[soc_idx, cost_idx]
-    value_next = np.full((soc_steps, cost_steps), neg_inf, dtype=float)
-    for c in range(cost_steps):
-        value_next[final_soc_idx, c] = 0.0
-
-    policy_next_soc = np.full((T, soc_steps, cost_steps), -1, dtype=np.int16 if soc_steps < 32000 else np.int32)
-    policy_next_cost = np.full((T, soc_steps, cost_steps), -1, dtype=np.int16 if cost_steps < 32000 else np.int32)
-
+    # Backward DP
     for t in range(T - 1, -1, -1):
-        value_now = np.full((soc_steps, cost_steps), neg_inf, dtype=float)
-
+        value_now = np.full(soc_steps, neg_inf, dtype=float)
         pv_t = pv[t]
         pv_price_t = pv_price[t]
         batt_sell_t = batt_sell[t]
         grid_buy_t = grid_buy[t]
+
+        # Cas de base : tout le PV est vendu directement
         pv_base_revenue = pv_t * pv_price_t
 
         for i in range(soc_steps):
+            best_val = neg_inf
+            best_j = -1
             soc_i = soc_grid[i]
 
-            for k in range(cost_steps):
-                avg_cost_i = cost_grid[k]
-                best_val = neg_inf
-                best_j = -1
-                best_k2 = -1
+            for j in transitions[i]:
+                delta_soc = soc_grid[j] - soc_i
+                reward = pv_base_revenue
+                
+                # --- Calcul des flux candidats ---
+                pv_direct_candidate = pv_t
+                pv_to_batt = 0.0
+                grid_charge = 0.0
+                discharge_candidate = 0.0
+                cycle_penalty = 0.0
 
-                for j in transitions[i]:
-                    delta_soc = soc_grid[j] - soc_i
-                    reward = pv_base_revenue
+                if delta_soc > 1e-12:
+                    # Charge batterie
+                    charge_input = delta_soc / inputs.eta_charge
+                    pv_to_batt = min(charge_input, pv_t)
+                    grid_charge = max(charge_input - pv_to_batt, 0.0)
+                    pv_direct_candidate = pv_t - pv_to_batt
 
+                    # 🚫 FILTRE QUANTILE CHARGE
+                    if grid_charge > 1e-9 and grid_buy_t > charge_threshold_series[t]:
+                        continue
+                    
+                    # no negative spread charging (anti-arbitrage)
+                    MIN_SPREAD = 10  # €/MWh
+                    if pv_t < charge_input and (batt_sell_t - grid_buy_t) < MIN_SPREAD:
+                        continue
+                
+                elif delta_soc < -1e-12:
+                    # Décharge batterie
+                    discharge_candidate = (-delta_soc) * inputs.eta_discharge
                     pv_direct_candidate = pv_t
-                    pv_to_batt = 0.0
-                    grid_charge = 0.0
-                    discharge_candidate = 0.0
+                    
+                    # 🚫 FILTRE QUANTILE DECHARGE
+                    if discharge_candidate > 1e-9:
+                        if batt_sell_t < discharge_threshold_series[t]:
+                            continue
+
+                # --- CONTRAINTE GRID ---
+                total_export = pv_direct_candidate + discharge_candidate
+
+                if total_export > inputs.grid_export_limit_mw:
+                    excess = total_export - inputs.grid_export_limit_mw
+
+                    # Curtail PV en priorité
+                    reduction_pv = min(excess, pv_direct_candidate)
+                    pv_direct_candidate -= reduction_pv
+                    excess -= reduction_pv
+
+                    # Puis réduire la décharge si nécessaire
+                    if excess > 0:
+                        discharge_candidate = max(discharge_candidate - excess, 0.0)
+
                     cycle_penalty = 0.0
-                    next_avg_cost = avg_cost_i
 
-                    if delta_soc > 1e-12:
-                        charge_input = delta_soc / inputs.eta_charge
-                        pv_to_batt = min(charge_input, pv_t)
-                        grid_charge = max(charge_input - pv_to_batt, 0.0)
-                        pv_direct_candidate = pv_t - pv_to_batt
-
-                        if grid_charge > 1e-9 and grid_buy_t > charge_threshold_series[t]:
-                            continue
-
-                        MIN_SPREAD = 10.0
-                        if pv_t < charge_input and (batt_sell_t - grid_buy_t) < MIN_SPREAD:
-                            continue
-
-                        # Weighted average stored cost update
-                        added_cost_eur = pv_to_batt * pv_price_t + grid_charge * grid_buy_t
-                        old_energy = soc_i
-                        new_energy = soc_grid[j]
-
-                        if new_energy > 1e-9:
-                            old_value_eur = avg_cost_i * old_energy
-                            new_value_eur = old_value_eur + added_cost_eur
-                            next_avg_cost = new_value_eur / new_energy
-                        else:
-                            next_avg_cost = 0.0
-
-                    elif delta_soc < -1e-12:
-                        discharge_candidate = (-delta_soc) * inputs.eta_discharge
-                        pv_direct_candidate = pv_t
-
-                        if discharge_candidate > 1e-9:
-                            if batt_sell_t < discharge_threshold_series[t]:
-                                continue
-                            if batt_sell_t < avg_cost_i + inputs.min_spread_arbitrage_eur_per_mwh:
-                                continue
-
-                        # Average cost remains unchanged while discharging remaining inventory
-                        next_avg_cost = avg_cost_i
-
-                    else:
-                        next_avg_cost = avg_cost_i
-
-                    total_export = pv_direct_candidate + discharge_candidate
-
-                    if total_export > inputs.grid_export_limit_mw:
-                        excess = total_export - inputs.grid_export_limit_mw
-
-                        reduction_pv = min(excess, pv_direct_candidate)
-                        pv_direct_candidate -= reduction_pv
-                        excess -= reduction_pv
-
-                        if excess > 0:
-                            discharge_candidate = max(discharge_candidate - excess, 0.0)
-
-                    if delta_soc < -1e-12 and discharge_candidate > 0:
+                    if discharge_candidate > 0:
                         throughput = abs(delta_soc)
-                        cycle_penalty = throughput * inputs.cycle_cost_eur_per_mwh
+                        cycle_penalty = (throughput / inputs.batt_energy_mwh) * inputs.cycle_cost_eur_per_mwh
 
-                    reward = pv_direct_candidate * pv_price_t
+                # --- Calcul du reward ---
+                reward = pv_direct_candidate * pv_price_t
+                
+                if delta_soc > 1e-12:
+                    reward -= grid_charge * grid_buy_t
+                
+                elif delta_soc < -1e-12:
+                    reward += discharge_candidate * batt_sell_t
+                    reward -= cycle_penalty
+                
+                else:
+                    reward = pv_direct_candidate * pv_price_t + discharge_candidate * batt_sell_t
+                    reward -= cycle_penalty
+                    
+                total_val = reward + value_next[j]
+                if total_val > best_val:
+                    best_val = total_val
+                    best_j = int(j)
 
-                    if delta_soc > 1e-12:
-                        reward -= grid_charge * grid_buy_t
-                    elif delta_soc < -1e-12:
-                        reward += discharge_candidate * batt_sell_t
-                        reward -= cycle_penalty
-                    else:
-                        reward -= cycle_penalty
-
-                    k2 = nearest_cost_index(next_avg_cost)
-                    total_val = reward + value_next[j, k2]
-
-                    if total_val > best_val:
-                        best_val = total_val
-                        best_j = int(j)
-                        best_k2 = int(k2)
-
-                value_now[i, k] = best_val
-                policy_next_soc[t, i, k] = best_j
-                policy_next_cost[t, i, k] = best_k2
+            value_now[i] = best_val
+            policy_next[t, i] = best_j
 
         value_next = value_now
 
     if np.all(value_next == neg_inf):
         raise RuntimeError("DP failed: all states unreachable")
 
+    # Forward reconstruction
     soc = np.zeros(T + 1, dtype=float)
-    soc[0] = soc_grid[init_soc_idx]
-
-    avg_stored_charge_price = np.full(T + 1, np.nan, dtype=float)
-    avg_stored_charge_price[0] = cost_grid[init_cost_idx] if soc[0] > 1e-9 else np.nan
-
-    state_soc = init_soc_idx
-    state_cost = init_cost_idx
+    soc[0] = soc_grid[init_idx]
+    state = init_idx
 
     pv_direct = np.zeros(T, dtype=float)
     pv_to_batt = np.zeros(T, dtype=float)
@@ -377,30 +346,28 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
     batt_sale_revenue = np.zeros(T, dtype=float)
     grid_charge_cost = np.zeros(T, dtype=float)
     pv_direct_revenue = np.zeros(T, dtype=float)
-    required_discharge_price = np.full(T, np.nan, dtype=float)
+    avg_stored_charge_price = np.full(T + 1, np.nan, dtype=float)   # EUR/MWh stored
+    required_discharge_price = np.full(T, np.nan, dtype=float)      # EUR/MWh
+    stored_energy_value_eur = 0.0                                   # total value of stored energy
+    stored_energy_mwh = soc[0]                                      # energy currently stored in battery
+    
+    if stored_energy_mwh > 1e-9:
+        avg_stored_charge_price[0] = 0.0  # or inputs.initial_stored_energy_cost_eur_per_mwh if you add that input
+    else:
+        avg_stored_charge_price[0] = np.nan
 
     for t in range(T):
-        next_soc = int(policy_next_soc[t, state_soc, state_cost])
-        next_cost = int(policy_next_cost[t, state_soc, state_cost])
+        next_state = int(policy_next[t, state])
+        if next_state < 0:
+            raise RuntimeError(f"Policy failure at t={t}, state={state}, value={value_next[state]}")
 
-        if next_soc < 0 or next_cost < 0:
-            raise RuntimeError(f"Policy failure at t={t}, soc_state={state_soc}, cost_state={state_cost}")
-
-        delta_soc = soc_grid[next_soc] - soc_grid[state_soc]
-        soc[t + 1] = soc_grid[next_soc]
+        delta_soc = soc_grid[next_state] - soc_grid[state]
+        soc[t + 1] = soc_grid[next_state]
 
         pv_direct_candidate = pv[t]
         pv_to_batt[t] = 0.0
         grid_charge[t] = 0.0
         discharge[t] = 0.0
-
-        current_avg_cost = cost_grid[state_cost]
-        if soc[t] > 1e-9:
-            avg_stored_charge_price[t] = current_avg_cost
-            required_discharge_price[t] = current_avg_cost + inputs.min_spread_arbitrage_eur_per_mwh
-        else:
-            avg_stored_charge_price[t] = np.nan
-            required_discharge_price[t] = np.nan
 
         if delta_soc > 1e-12:
             charge_input = delta_soc / inputs.eta_charge
@@ -411,7 +378,39 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
         elif delta_soc < -1e-12:
             discharge[t] = (-delta_soc) * inputs.eta_discharge
             pv_direct_candidate = pv[t]
+            
+        # --- Stored energy cost basis accounting ---
+        if delta_soc > 1e-12:
+            # Cost of charging sources
+            charge_cost_eur = (
+                pv_to_batt[t] * pv_price[t] +
+                grid_charge[t] * grid_buy[t]
+            )
 
+            # Add newly stored energy at its acquisition cost
+            stored_energy_value_eur += charge_cost_eur
+            stored_energy_mwh += delta_soc
+
+        elif delta_soc < -1e-12:
+            # Average cost of energy currently in the battery
+            avg_cost_now = stored_energy_value_eur / max(stored_energy_mwh, 1e-9)
+
+            # Remove discharged energy from inventory at average cost
+            energy_removed_from_soc = -delta_soc
+            cost_removed_eur = avg_cost_now * energy_removed_from_soc
+
+            stored_energy_value_eur = max(stored_energy_value_eur - cost_removed_eur, 0.0)
+            stored_energy_mwh = max(stored_energy_mwh - energy_removed_from_soc, 0.0)
+
+        if stored_energy_mwh > 1e-9:
+            avg_stored_charge_price[t + 1] = stored_energy_value_eur / stored_energy_mwh
+        else:
+            avg_stored_charge_price[t + 1] = np.nan
+
+        if np.isfinite(avg_stored_charge_price[t]):
+            required_discharge_price[t] = avg_stored_charge_price[t] + inputs.min_spread_arbitrage_eur_per_mwh
+
+        # --- CONTRAINTE GRID ---
         total_export = pv_direct_candidate + discharge[t]
 
         if total_export > inputs.grid_export_limit_mw:
@@ -430,10 +429,7 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
         batt_sale_revenue[t] = discharge[t] * batt_sell[t]
         grid_charge_cost[t] = grid_charge[t] * grid_buy[t]
 
-        state_soc = next_soc
-        state_cost = next_cost
-
-    avg_stored_charge_price[T] = cost_grid[state_cost] if soc[T] > 1e-9 else np.nan
+        state = next_state
 
     total_direct_pv_revenue = float(pv_direct_revenue.sum())
     total_batt_sale_revenue = float(batt_sale_revenue.sum())
@@ -550,7 +546,6 @@ def app():
         availability_pct = st.number_input("Disponibilité globale centrale (%)", min_value=0.0, max_value=100.0, value=98.0, step=0.1)
         eta_charge = st.number_input("Rendement de charge batterie (%)", min_value=1.0, max_value=100.0, value=95.0, step=0.5) / 100.0
         eta_discharge = st.number_input("Rendement de décharge batterie (%)", min_value=1.0, max_value=100.0, value=95.0, step=0.5) / 100.0
-        cost_steps = st.slider("Nombre de pas pour le coût moyen stocké", min_value=11, max_value=101, value=31, step=10)
 
     with col3:
         nightly_bess_revenue = st.number_input("Revenu services système nuit (EUR/nuit)", min_value=0.0, value=0.0, step=10.0)
@@ -721,7 +716,6 @@ def app():
             discharge_quantile=discharge_quantile,
             max_cycles_per_day=max_cycles,
             min_spread_arbitrage_eur_per_mwh=min_spread_arbitrage,
-            cost_steps=cost_steps,
         )
 
         with st.spinner("Optimisation économique annuelle en cours..."):
@@ -786,8 +780,7 @@ def app():
         
         debug["charge_allowed"] = debug["grid_buy_price_eur_per_mwh"] <= debug["charge_threshold_day"]
         debug["discharge_allowed"] = (
-            (debug["battery_sell_price_eur_per_mwh"] >= debug["discharge_threshold_day"]) &
-            (debug["battery_sell_price_eur_per_mwh"] >= debug["required_discharge_price_eur_per_mwh"])
+            debug["battery_sell_price_eur_per_mwh"] >= debug["discharge_threshold_day"]
         )
         "avg_stored_charge_price_eur_per_mwh",
         "required_discharge_price_eur_per_mwh",
@@ -800,8 +793,6 @@ def app():
                 "charge_threshold_day",
                 "battery_sell_price_eur_per_mwh",
                 "discharge_threshold_day",
-                "avg_stored_charge_price_eur_per_mwh",
-                "required_discharge_price_eur_per_mwh",
                 "grid_charge_mwh",
                 "battery_discharge_mwh",
                 "charge_allowed",
