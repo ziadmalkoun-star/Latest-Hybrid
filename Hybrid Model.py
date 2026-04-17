@@ -754,7 +754,7 @@ def app():
                 df["battery_discharge_mwh"],
                 width=bar_width,
                 label="Batterie → Réseau",
-                alpha=0.8
+                alpha=0.8, color='green'
             )
             
             # Battery charging as negative bars
