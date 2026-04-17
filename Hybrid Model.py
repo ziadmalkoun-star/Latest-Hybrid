@@ -183,47 +183,6 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
     discharge_threshold_series = df_thresholds.groupby("day")["batt_sell"].transform(
         lambda x: np.percentile(x, inputs.discharge_quantile)
     ).to_numpy()
-    # Daily arbitrage authorization:
-    # discharge is allowed only if today's best sell price exceeds
-    # the reference charge price by at least the minimum spread.
-    daily_stats = pd.DataFrame({
-        "datetime": idx,
-        "grid_buy": grid_buy,
-        "batt_sell": batt_sell,
-    })
-    daily_stats["day"] = daily_stats["datetime"].dt.date
-
-    daily_charge_ref = daily_stats.groupby("day")["grid_buy"].min()
-    daily_discharge_ref = daily_stats.groupby("day")["batt_sell"].max()
-
-    unique_days = list(daily_charge_ref.index)
-    arbitrage_ok_by_day = {}
-
-    prev_charge_ref = None
-    waiting_charge_ref = None
-
-    for i, day in enumerate(unique_days):
-        charge_ref_today = float(daily_charge_ref.loc[day])
-        discharge_ref_today = float(daily_discharge_ref.loc[day])
-
-        if i == 0:
-            arbitrage_ok_by_day[day] = False
-            prev_charge_ref = charge_ref_today
-            waiting_charge_ref = charge_ref_today
-            continue
-
-        spread_ok = (discharge_ref_today - waiting_charge_ref) >= inputs.min_spread_arbitrage_eur_per_mwh
-        arbitrage_ok_by_day[day] = spread_ok
-
-        if spread_ok:
-            waiting_charge_ref = charge_ref_today
-        else:
-            # keep waiting; keep old reference charge day
-            pass
-
-        prev_charge_ref = charge_ref_today
-
-    arbitrage_ok_series = daily_stats["day"].map(arbitrage_ok_by_day).to_numpy(dtype=bool)
     
     max_total_discharge = inputs.max_cycles_per_day * 365.0 * inputs.batt_energy_mwh
 
@@ -326,8 +285,6 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
                     if discharge_candidate > 1e-9:
                         if batt_sell_t < discharge_threshold_series[t]:
                             continue
-                        if not arbitrage_ok_series[t]:
-                            continue
 
                 # --- CONTRAINTE GRID ---
                 total_export = pv_direct_candidate + discharge_candidate
@@ -389,6 +346,15 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
     batt_sale_revenue = np.zeros(T, dtype=float)
     grid_charge_cost = np.zeros(T, dtype=float)
     pv_direct_revenue = np.zeros(T, dtype=float)
+    avg_stored_charge_price = np.full(T + 1, np.nan, dtype=float)   # EUR/MWh stored
+    required_discharge_price = np.full(T, np.nan, dtype=float)      # EUR/MWh
+    stored_energy_value_eur = 0.0                                   # total value of stored energy
+    stored_energy_mwh = soc[0]                                      # energy currently stored in battery
+    
+    if stored_energy_mwh > 1e-9:
+        avg_stored_charge_price[0] = 0.0  # or inputs.initial_stored_energy_cost_eur_per_mwh if you add that input
+    else:
+        avg_stored_charge_price[0] = np.nan
 
     for t in range(T):
         next_state = int(policy_next[t, state])
@@ -412,6 +378,37 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
         elif delta_soc < -1e-12:
             discharge[t] = (-delta_soc) * inputs.eta_discharge
             pv_direct_candidate = pv[t]
+            
+        # --- Stored energy cost basis accounting ---
+        if delta_soc > 1e-12:
+            # Cost of charging sources
+            charge_cost_eur = (
+                pv_to_batt[t] * pv_price[t] +
+                grid_charge[t] * grid_buy[t]
+            )
+
+            # Add newly stored energy at its acquisition cost
+            stored_energy_value_eur += charge_cost_eur
+            stored_energy_mwh += delta_soc
+
+        elif delta_soc < -1e-12:
+            # Average cost of energy currently in the battery
+            avg_cost_now = stored_energy_value_eur / max(stored_energy_mwh, 1e-9)
+
+            # Remove discharged energy from inventory at average cost
+            energy_removed_from_soc = -delta_soc
+            cost_removed_eur = avg_cost_now * energy_removed_from_soc
+
+            stored_energy_value_eur = max(stored_energy_value_eur - cost_removed_eur, 0.0)
+            stored_energy_mwh = max(stored_energy_mwh - energy_removed_from_soc, 0.0)
+
+        if stored_energy_mwh > 1e-9:
+            avg_stored_charge_price[t + 1] = stored_energy_value_eur / stored_energy_mwh
+        else:
+            avg_stored_charge_price[t + 1] = np.nan
+
+        if np.isfinite(avg_stored_charge_price[t]):
+            required_discharge_price[t] = avg_stored_charge_price[t] + inputs.min_spread_arbitrage_eur_per_mwh
 
         # --- CONTRAINTE GRID ---
         total_export = pv_direct_candidate + discharge[t]
@@ -458,6 +455,8 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
         "energy_sold_total_mwh": np.array([pv_direct.sum() + discharge.sum()]),
         "energy_shifted_mwh": np.array([discharge.sum()]),
         "pv_direct_sold_mwh": np.array([pv_direct.sum()]),
+        "avg_stored_charge_price": avg_stored_charge_price,
+        "required_discharge_price": required_discharge_price,
     }
     return result
 
@@ -740,6 +739,8 @@ def app():
             "pv_direct_revenue_eur": result["pv_direct_revenue"],
             "battery_sale_revenue_eur": result["batt_sale_revenue"],
             "grid_charge_cost_eur": result["grid_charge_cost"],
+            "avg_stored_charge_price_eur_per_mwh": result["avg_stored_charge_price"][1:],
+            "required_discharge_price_eur_per_mwh": result["required_discharge_price"],
         })
         # ---------------- DEBUG BLOCK HERE ----------------
         debug = hourly_df[
@@ -764,34 +765,6 @@ def app():
             lambda x: np.percentile(x, discharge_quantile)
         )
         
-        # If you use a minimum spread rule, use percentile-based daily charge reference
-        daily_charge_ref_dbg = thresholds_debug.groupby("day")["grid_buy_price_eur_per_mwh"].apply(
-            lambda x: np.percentile(x, charge_quantile)
-        )
-        daily_discharge_ref_dbg = thresholds_debug.groupby("day")["battery_sell_price_eur_per_mwh"].max()
-        
-        unique_days_dbg = list(daily_charge_ref_dbg.index)
-        arbitrage_ok_by_day_dbg = {}
-        waiting_charge_ref_dbg = None
-        spread_reference_by_day_dbg = {}
-        
-        for i, day in enumerate(unique_days_dbg):
-            charge_ref_today = float(daily_charge_ref_dbg.loc[day])
-            discharge_ref_today = float(daily_discharge_ref_dbg.loc[day])
-        
-            if i == 0:
-                arbitrage_ok_by_day_dbg[day] = False
-                waiting_charge_ref_dbg = charge_ref_today
-                spread_reference_by_day_dbg[day] = waiting_charge_ref_dbg
-                continue
-        
-            spread_reference_by_day_dbg[day] = waiting_charge_ref_dbg
-            spread_ok = (discharge_ref_today - waiting_charge_ref_dbg) >= min_spread_arbitrage
-            arbitrage_ok_by_day_dbg[day] = spread_ok
-        
-            if spread_ok:
-                waiting_charge_ref_dbg = charge_ref_today
-        
         # Merge daily info into debug window
         debug = debug.merge(
             thresholds_debug[[
@@ -804,15 +777,13 @@ def app():
         )
         
         debug["day"] = debug["datetime"].dt.date
-        debug["spread_reference_charge_price"] = debug["day"].map(spread_reference_by_day_dbg)
-        debug["arbitrage_day_allowed"] = debug["day"].map(arbitrage_ok_by_day_dbg)
         
         debug["charge_allowed"] = debug["grid_buy_price_eur_per_mwh"] <= debug["charge_threshold_day"]
         debug["discharge_allowed"] = (
-            (debug["battery_sell_price_eur_per_mwh"] >= debug["discharge_threshold_day"]) &
-            (debug["arbitrage_day_allowed"])
+            debug["battery_sell_price_eur_per_mwh"] >= debug["discharge_threshold_day"]
         )
-        
+        "avg_stored_charge_price_eur_per_mwh",
+        "required_discharge_price_eur_per_mwh",
         st.subheader("Debug dispatch (3 premiers jours de juin)")
         st.dataframe(
             debug[[
@@ -820,10 +791,8 @@ def app():
                 "battery_soc_mwh_end",
                 "grid_buy_price_eur_per_mwh",
                 "charge_threshold_day",
-                "spread_reference_charge_price",
                 "battery_sell_price_eur_per_mwh",
                 "discharge_threshold_day",
-                "arbitrage_day_allowed",
                 "grid_charge_mwh",
                 "battery_discharge_mwh",
                 "charge_allowed",
