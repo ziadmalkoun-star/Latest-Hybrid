@@ -165,8 +165,8 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
     pv_price = _validate_array_length(inputs.pv_price, "Le prix PV")
     batt_sell = _validate_array_length(inputs.batt_sell_price, "Le prix de vente batterie")
     grid_buy = _validate_array_length(inputs.grid_buy_price, "Le prix d'achat réseau")
-    charge_threshold = np.percentile(grid_buy, 100 - inputs.charge_quantile)  # Invert for "cheaper than"
-    discharge_threshold = np.percentile(batt_sell, 100 - inputs.discharge_quantile)  # Invert for "more expensive than"
+    charge_threshold = np.percentile(grid_buy, inputs.charge_quantile)  # Invert for "cheaper than"
+    discharge_threshold = np.percentile(batt_sell, inputs.discharge_quantile)  # Invert for "more expensive than"
     max_total_discharge = inputs.max_cycles_per_day * 365.0 * inputs.batt_energy_mwh
 
     if np.any(~np.isfinite(pv)) or np.any(~np.isfinite(pv_price)) or np.any(~np.isfinite(batt_sell)) or np.any(~np.isfinite(grid_buy)):
