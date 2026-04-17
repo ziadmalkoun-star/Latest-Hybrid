@@ -33,7 +33,7 @@ class SimulationInputs:
     charge_quantile: float
     discharge_quantile: float
     max_cycles_per_day: float
-    
+    min_spread_arbitrage_eur_per_mwh: float
 
 def _validate_array_length(arr: np.ndarray, name: str, expected_len: int = HOURS_PER_YEAR) -> np.ndarray:
     arr = np.asarray(arr, dtype=float).reshape(-1)
@@ -183,6 +183,48 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
     discharge_threshold_series = df_thresholds.groupby("day")["batt_sell"].transform(
         lambda x: np.percentile(x, inputs.discharge_quantile)
     ).to_numpy()
+    # Daily arbitrage authorization:
+    # discharge is allowed only if today's best sell price exceeds
+    # the reference charge price by at least the minimum spread.
+    daily_stats = pd.DataFrame({
+        "datetime": idx,
+        "grid_buy": grid_buy,
+        "batt_sell": batt_sell,
+    })
+    daily_stats["day"] = daily_stats["datetime"].dt.date
+
+    daily_charge_ref = daily_stats.groupby("day")["grid_buy"].min()
+    daily_discharge_ref = daily_stats.groupby("day")["batt_sell"].max()
+
+    unique_days = list(daily_charge_ref.index)
+    arbitrage_ok_by_day = {}
+
+    prev_charge_ref = None
+    waiting_charge_ref = None
+
+    for i, day in enumerate(unique_days):
+        charge_ref_today = float(daily_charge_ref.loc[day])
+        discharge_ref_today = float(daily_discharge_ref.loc[day])
+
+        if i == 0:
+            arbitrage_ok_by_day[day] = False
+            prev_charge_ref = charge_ref_today
+            waiting_charge_ref = charge_ref_today
+            continue
+
+        spread_ok = (discharge_ref_today - waiting_charge_ref) >= inputs.min_spread_arbitrage_eur_per_mwh
+        arbitrage_ok_by_day[day] = spread_ok
+
+        if spread_ok:
+            waiting_charge_ref = charge_ref_today
+        else:
+            # keep waiting; keep old reference charge day
+            pass
+
+        prev_charge_ref = charge_ref_today
+
+    arbitrage_ok_series = daily_stats["day"].map(arbitrage_ok_by_day).to_numpy(dtype=bool)
+    
     max_total_discharge = inputs.max_cycles_per_day * 365.0 * inputs.batt_energy_mwh
 
     if np.any(~np.isfinite(pv)) or np.any(~np.isfinite(pv_price)) or np.any(~np.isfinite(batt_sell)) or np.any(~np.isfinite(grid_buy)):
@@ -281,8 +323,11 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
                     pv_direct_candidate = pv_t
                     
                     # 🚫 FILTRE QUANTILE DECHARGE
-                    if discharge_candidate > 1e-9 and batt_sell_t < discharge_threshold_series[t]:
-                        continue
+                    if discharge_candidate > 1e-9:
+                        if batt_sell_t < discharge_threshold_series[t]:
+                            continue
+                        if not arbitrage_ok_series[t]:
+                            continue
 
                 # --- CONTRAINTE GRID ---
                 total_export = pv_direct_candidate + discharge_candidate
@@ -487,6 +532,12 @@ def app():
         productible = st.number_input("Productible PV (kWh/kWc/an)", min_value=0.0, value=1200.0, step=10.0)
         grid_export_limit_mw = st.number_input("Limite injection réseau (MW)", min_value=0.0, value=pv_dc_mw, step=1.0)
         cycle_cost = st.number_input("Coût de cycle batterie (EUR/MWh)", value=5.0)
+        min_spread_arbitrage = st.number_input(
+        "Minimum Spread for Arbitrage (EUR/MWh)",
+        min_value=0.0,
+        value=10.0,
+        step=1.0,
+    )
         charge_quantile = st.slider("Quantile charge (%)", 0, 50, 20)
         discharge_quantile = st.slider("Quantile décharge (%)", 0, 100, 80)
         max_cycles = st.number_input("Cycles max / jour", min_value=0.0, value=1.0, step=0.1)
@@ -665,6 +716,7 @@ def app():
             charge_quantile=charge_quantile,
             discharge_quantile=discharge_quantile,
             max_cycles_per_day=max_cycles,
+            min_spread_arbitrage_eur_per_mwh=min_spread_arbitrage,
         )
 
         with st.spinner("Optimisation économique annuelle en cours..."):
@@ -695,7 +747,7 @@ def app():
             (hourly_df["datetime"] < pd.Timestamp(f"{DEFAULT_YEAR}-06-04 00:00:00"))
         ].copy()
         
-        # Daily thresholds for the full year
+        # Build daily thresholds on the full year
         thresholds_debug = hourly_df[[
             "datetime",
             "grid_buy_price_eur_per_mwh",
@@ -712,8 +764,35 @@ def app():
             lambda x: np.percentile(x, discharge_quantile)
         )
         
-        # Merge daily thresholds into debug window
-        debug["day"] = debug["datetime"].dt.date
+        # If you use a minimum spread rule, use percentile-based daily charge reference
+        daily_charge_ref_dbg = thresholds_debug.groupby("day")["grid_buy_price_eur_per_mwh"].apply(
+            lambda x: np.percentile(x, charge_quantile)
+        )
+        daily_discharge_ref_dbg = thresholds_debug.groupby("day")["battery_sell_price_eur_per_mwh"].max()
+        
+        unique_days_dbg = list(daily_charge_ref_dbg.index)
+        arbitrage_ok_by_day_dbg = {}
+        waiting_charge_ref_dbg = None
+        spread_reference_by_day_dbg = {}
+        
+        for i, day in enumerate(unique_days_dbg):
+            charge_ref_today = float(daily_charge_ref_dbg.loc[day])
+            discharge_ref_today = float(daily_discharge_ref_dbg.loc[day])
+        
+            if i == 0:
+                arbitrage_ok_by_day_dbg[day] = False
+                waiting_charge_ref_dbg = charge_ref_today
+                spread_reference_by_day_dbg[day] = waiting_charge_ref_dbg
+                continue
+        
+            spread_reference_by_day_dbg[day] = waiting_charge_ref_dbg
+            spread_ok = (discharge_ref_today - waiting_charge_ref_dbg) >= min_spread_arbitrage
+            arbitrage_ok_by_day_dbg[day] = spread_ok
+        
+            if spread_ok:
+                waiting_charge_ref_dbg = charge_ref_today
+        
+        # Merge daily info into debug window
         debug = debug.merge(
             thresholds_debug[[
                 "datetime",
@@ -724,8 +803,15 @@ def app():
             how="left"
         )
         
+        debug["day"] = debug["datetime"].dt.date
+        debug["spread_reference_charge_price"] = debug["day"].map(spread_reference_by_day_dbg)
+        debug["arbitrage_day_allowed"] = debug["day"].map(arbitrage_ok_by_day_dbg)
+        
         debug["charge_allowed"] = debug["grid_buy_price_eur_per_mwh"] <= debug["charge_threshold_day"]
-        debug["discharge_allowed"] = debug["battery_sell_price_eur_per_mwh"] >= debug["discharge_threshold_day"]
+        debug["discharge_allowed"] = (
+            (debug["battery_sell_price_eur_per_mwh"] >= debug["discharge_threshold_day"]) &
+            (debug["arbitrage_day_allowed"])
+        )
         
         st.subheader("Debug dispatch (3 premiers jours de juin)")
         st.dataframe(
@@ -734,8 +820,10 @@ def app():
                 "battery_soc_mwh_end",
                 "grid_buy_price_eur_per_mwh",
                 "charge_threshold_day",
+                "spread_reference_charge_price",
                 "battery_sell_price_eur_per_mwh",
                 "discharge_threshold_day",
+                "arbitrage_day_allowed",
                 "grid_charge_mwh",
                 "battery_discharge_mwh",
                 "charge_allowed",
@@ -743,6 +831,7 @@ def app():
             ]],
             use_container_width=True,
         )
+        # --------------------------------------------------
         
         st.write(
             f"Charge threshold 2025-06-01: "
