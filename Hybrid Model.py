@@ -699,7 +699,8 @@ def app():
             ]],
             use_container_width=True,
         )
-        
+        st.write(f"Charge threshold: {charge_threshold_val:.2f} EUR/MWh")
+        st.write(f"Discharge threshold: {discharge_threshold_val:.2f} EUR/MWh")
         excel_bytes = to_excel_bytes(summary_df, monthly_df, hourly_df)
 
         st.success("Simulation terminée.")
