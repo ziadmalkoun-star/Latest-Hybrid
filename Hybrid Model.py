@@ -694,11 +694,37 @@ def app():
             (hourly_df["datetime"] < pd.Timestamp(f"{DEFAULT_YEAR}-06-04 00:00:00"))
         ].copy()
         
-        charge_threshold_val = np.percentile(grid_buy_curve, charge_quantile)
-        discharge_threshold_val = np.percentile(batt_sell_curve, discharge_quantile)
+        # Daily thresholds for the full year
+        thresholds_debug = hourly_df[[
+            "datetime",
+            "grid_buy_price_eur_per_mwh",
+            "battery_sell_price_eur_per_mwh",
+        ]].copy()
         
-        debug["charge_allowed"] = debug["grid_buy_price_eur_per_mwh"] <= charge_threshold_val
-        debug["discharge_allowed"] = debug["battery_sell_price_eur_per_mwh"] >= discharge_threshold_val
+        thresholds_debug["day"] = thresholds_debug["datetime"].dt.date
+        
+        thresholds_debug["charge_threshold_day"] = thresholds_debug.groupby("day")["grid_buy_price_eur_per_mwh"].transform(
+            lambda x: np.percentile(x, charge_quantile)
+        )
+        
+        thresholds_debug["discharge_threshold_day"] = thresholds_debug.groupby("day")["battery_sell_price_eur_per_mwh"].transform(
+            lambda x: np.percentile(x, discharge_quantile)
+        )
+        
+        # Merge daily thresholds into debug window
+        debug["day"] = debug["datetime"].dt.date
+        debug = debug.merge(
+            thresholds_debug[[
+                "datetime",
+                "charge_threshold_day",
+                "discharge_threshold_day",
+            ]],
+            on="datetime",
+            how="left"
+        )
+        
+        debug["charge_allowed"] = debug["grid_buy_price_eur_per_mwh"] <= debug["charge_threshold_day"]
+        debug["discharge_allowed"] = debug["battery_sell_price_eur_per_mwh"] >= debug["discharge_threshold_day"]
         
         st.subheader("Debug dispatch (3 premiers jours de juin)")
         st.dataframe(
@@ -706,7 +732,9 @@ def app():
                 "datetime",
                 "battery_soc_mwh_end",
                 "grid_buy_price_eur_per_mwh",
+                "charge_threshold_day",
                 "battery_sell_price_eur_per_mwh",
+                "discharge_threshold_day",
                 "grid_charge_mwh",
                 "battery_discharge_mwh",
                 "charge_allowed",
@@ -714,8 +742,16 @@ def app():
             ]],
             use_container_width=True,
         )
-        st.write(f"Charge threshold: {charge_threshold_val:.2f} EUR/MWh")
-        st.write(f"Discharge threshold: {discharge_threshold_val:.2f} EUR/MWh")
+        
+        st.write(
+            f"Charge threshold 2025-06-01: "
+            f"{debug.loc[debug['datetime'].dt.date == pd.to_datetime('2025-06-01').date(), 'charge_threshold_day'].iloc[0]:.2f} EUR/MWh"
+        )
+        st.write(
+            f"Discharge threshold 2025-06-01: "
+            f"{debug.loc[debug['datetime'].dt.date == pd.to_datetime('2025-06-01').date(), 'discharge_threshold_day'].iloc[0]:.2f} EUR/MWh"
+        )
+        
         excel_bytes = to_excel_bytes(summary_df, monthly_df, hourly_df)
 
         st.success("Simulation terminée.")
