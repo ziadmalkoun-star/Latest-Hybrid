@@ -165,8 +165,23 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
     pv_price = _validate_array_length(inputs.pv_price, "Le prix PV")
     batt_sell = _validate_array_length(inputs.batt_sell_price, "Le prix de vente batterie")
     grid_buy = _validate_array_length(inputs.grid_buy_price, "Le prix d'achat réseau")
-    charge_threshold = np.percentile(grid_buy, inputs.charge_quantile)  # Invert for "cheaper than"
-    discharge_threshold = np.percentile(batt_sell, inputs.discharge_quantile)  # Invert for "more expensive than"
+   # Thresholds computed per day
+    idx = pd.date_range(f"{DEFAULT_YEAR}-01-01 00:00:00", periods=HOURS_PER_YEAR, freq="h")
+    
+    df_thresholds = pd.DataFrame({
+        "datetime": idx,
+        "grid_buy": grid_buy,
+        "batt_sell": batt_sell,
+    })
+    df_thresholds["day"] = df_thresholds["datetime"].dt.date
+    
+    charge_threshold_series = df_thresholds.groupby("day")["grid_buy"].transform(
+        lambda x: np.percentile(x, inputs.charge_quantile)
+    ).to_numpy()
+    
+    discharge_threshold_series = df_thresholds.groupby("day")["batt_sell"].transform(
+        lambda x: np.percentile(x, inputs.discharge_quantile)
+    ).to_numpy()
     max_total_discharge = inputs.max_cycles_per_day * 365.0 * inputs.batt_energy_mwh
 
     if np.any(~np.isfinite(pv)) or np.any(~np.isfinite(pv_price)) or np.any(~np.isfinite(batt_sell)) or np.any(~np.isfinite(grid_buy)):
@@ -251,7 +266,7 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
                     pv_direct_candidate = pv_t - pv_to_batt
 
                     # 🚫 FILTRE QUANTILE CHARGE
-                    if grid_charge > 1e-9 and grid_buy_t > charge_threshold:
+                    if grid_charge > 1e-9 and grid_buy_t > charge_threshold_series[t]:
                         continue
                     
                     # no negative spread charging (anti-arbitrage)
@@ -265,7 +280,7 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
                     pv_direct_candidate = pv_t
                     
                     # 🚫 FILTRE QUANTILE DECHARGE
-                    if discharge_candidate > 1e-9 and batt_sell_t < discharge_threshold:
+                    if discharge_candidate > 1e-9 and batt_sell_t < discharge_threshold_series[t]:
                         continue
 
                 # --- CONTRAINTE GRID ---
