@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
+import matplotlib.dates as mdates
 
 HOURS_PER_YEAR = 8760
 DEFAULT_YEAR = 2025  # année non bissextile
@@ -747,9 +748,6 @@ def app():
             # Replace single line plot with filled area
             ax1.fill_between(df["datetime"], df["pv_direct_mwh"], color='blue', alpha=0.5, label="PV → Réseau")
             ax1.plot(df["datetime"], df["pv_direct_mwh"], color='blue', linewidth=1.8)
-            # Set x-axis major locator to 6-hour intervals
-            ax.xaxis.set_major_locator(mdates.HourLocator(interval=6))
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%H'))
 
             # Battery discharge as positive bars
             ax1.bar(
@@ -780,7 +778,10 @@ def app():
 
             ax1.axhline(0, linewidth=1)  # ligne zéro
             ax1.set_ylabel("Flux énergie (MWh)")
-            ax1.set_xlabel("Date")
+            ax1.set_xlabel("Heure")
+            ax1.xaxis.set_major_locator(mdates.HourLocator(interval=6))
+            ax1.xaxis.set_major_formatter(mdates.DateFormatter("%Hh"))
+            ax1.tick_params(axis="x", rotation=0)
 
             # --- Prix (axe secondaire) ---
             ax2 = ax1.twinx()
