@@ -923,8 +923,8 @@ def app():
             # PV direct stays as area if you want
             ax1.plot(df["datetime"], df["pv_direct_mwh"], label="PV → Réseau", linewidth=1.8)
             # Replace single line plot with filled area
-            ax1.fill_between(df["datetime"], df["pv_direct_mwh"], color='blue', alpha=0.5, label="PV → Réseau")
-            ax1.plot(df["datetime"], df["pv_direct_mwh"], color='blue', linewidth=1.8)
+            ax1.fill_between(df["datetime"], df["pv_direct_mwh"], color='orange', alpha=0.5, label="PV → Réseau")
+            ax1.plot(df["datetime"], df["pv_direct_mwh"], color='orange', linewidth=1.8)
 
             # Battery discharge as positive bars
             ax1.bar(
@@ -941,7 +941,7 @@ def app():
                 -df["pv_to_battery_mwh"],
                 width=bar_width,
                 label="PV → Batterie",
-                alpha=0.6, color='orange'
+                alpha=0.6, color='red'
             )
             
             ax1.bar(
