@@ -683,9 +683,12 @@ def app():
                     availability_pct,
                 )
             else:
-                pv_hourly_mwh = np.maximum(uploaded, 0.0)
+                # uploaded is for 1 MW → scale to plant size
+                pv_hourly_mwh = np.maximum(uploaded, 0.0) * pv_dc_mw
+            
                 annual_net = float(pv_hourly_mwh.sum())
                 annual_dc = float(pv_dc_mw * productible)
+            
                 pv_stats = {
                     "annual_dc_mwh": annual_dc,
                     "annual_net_mwh": annual_net,
