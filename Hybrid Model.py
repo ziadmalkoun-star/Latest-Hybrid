@@ -467,10 +467,20 @@ def build_summary_table(
     batt_power_mw: float,
 ) -> pd.DataFrame:
     pv_revenue = float(result["total_direct_pv_revenue"][0])
-    bess_revenue = float(result["total_batt_sale_revenue"][0]) - float(result["total_grid_charge_cost"][0]) + float(result["nightly_revenue_total"][0])
+    bess_revenue = (
+        float(result["total_batt_sale_revenue"][0])
+        - float(result["total_grid_charge_cost"][0])
+        + float(result["nightly_revenue_total"][0])
+    )
 
     pv_rev_keur_per_mw = pv_revenue / max(pv_dc_mw, 1e-12) / 1000.0
     bess_rev_keur_per_mw = bess_revenue / max(batt_power_mw, 1e-12) / 1000.0
+
+    pv_sold_mwh = float(result["pv_direct_sold_mwh"][0])
+    bess_sold_mwh = float(result["energy_shifted_mwh"][0])
+
+    pv_rev_keur_per_mwh = pv_revenue / max(pv_sold_mwh, 1e-12) / 1000.0
+    bess_rev_keur_per_mwh = bess_revenue / max(bess_sold_mwh, 1e-12) / 1000.0
 
     rows = [
         ("Revenu total", float(result["total_revenue"][0]), "EUR"),
@@ -480,9 +490,11 @@ def build_summary_table(
         ("Revenu services système de nuit", float(result["nightly_revenue_total"][0]), "EUR"),
         ("Revenu PV spécifique", pv_rev_keur_per_mw, "kEUR/MW"),
         ("Revenu BESS spécifique", bess_rev_keur_per_mw, "kEUR/MW"),
+        ("Revenu PV spécifique énergie", pv_rev_keur_per_mwh, "kEUR/MWh"),
+        ("Revenu BESS spécifique énergie", bess_rev_keur_per_mwh, "kEUR/MWh"),
         ("Énergie totale vendue", float(result["energy_sold_total_mwh"][0]), "MWh"),
-        ("Énergie shiftée par batterie", float(result["energy_shifted_mwh"][0]), "MWh"),
-        ("Énergie PV vendue directement", float(result["pv_direct_sold_mwh"][0]), "MWh"),
+        ("Énergie shiftée par batterie", bess_sold_mwh, "MWh"),
+        ("Énergie PV vendue directement", pv_sold_mwh, "MWh"),
         ("Cycles équivalents batterie", float(result["equivalent_cycles"][0]), "cycles/an"),
         ("Production PV théorique brute", float(pv_stats["annual_dc_mwh"]), "MWh"),
         ("Production PV nette valorisable", float(pv_stats["annual_net_mwh"]), "MWh"),
@@ -510,6 +522,9 @@ def monthly_dataframe(result: Dict[str, np.ndarray], pv_dc_mw: float, batt_power
 
     monthly["pv_revenue_keur_per_mw"] = monthly["pv_direct_revenue"] / max(pv_dc_mw, 1e-12) / 1000.0
     monthly["bess_revenue_keur_per_mw"] = monthly["bess_net_revenue"] / max(batt_power_mw, 1e-12) / 1000.0
+
+    monthly["pv_revenue_keur_per_mwh"] = monthly["pv_direct_revenue"] / monthly["pv_direct_mwh"].clip(lower=1e-12) / 1000.0
+    monthly["bess_revenue_keur_per_mwh"] = monthly["bess_net_revenue"] / monthly["shifted_mwh"].clip(lower=1e-12) / 1000.0
 
     return monthly
 
@@ -929,6 +944,43 @@ def app():
             fig, ax1 = plt.subplots(figsize=(12, 5))
 
             bar_width = 0.03  # ~45 min in matplotlib date units
+
+        c5, c6 = st.columns(2)
+
+        with c5:
+            fig5, ax5 = plt.subplots(figsize=(9, 4.8))
+        
+            x = np.arange(len(monthly_df))
+        
+            bess_vals_mwh = monthly_df["bess_revenue_keur_per_mwh"].to_numpy(dtype=float)
+            pv_vals_mwh = monthly_df["pv_revenue_keur_per_mwh"].to_numpy(dtype=float)
+        
+            ax5.bar(
+                x,
+                bess_vals_mwh,
+                width=0.65,
+                color="green",
+                label="BESS"
+            )
+        
+            ax5.bar(
+                x,
+                pv_vals_mwh,
+                width=0.65,
+                bottom=bess_vals_mwh,
+                color="orange",
+                label="PV"
+            )
+        
+            ax5.set_title("Revenus mensuels spécifiques énergie")
+            ax5.set_ylabel("kEUR/MWh")
+            ax5.set_xlabel("Mois")
+            ax5.set_xticks(x)
+            ax5.set_xticklabels(monthly_df["month"], rotation=45)
+            ax5.legend()
+        
+            st.pyplot(fig5)
+            plt.close(fig5)
             
             # PV direct stays as area if you want
             ax1.plot(df["datetime"], df["pv_direct_mwh"], label="PV → Réseau", linewidth=1.8)
