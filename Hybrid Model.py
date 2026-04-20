@@ -869,7 +869,7 @@ def app():
         with c4:
             # --- Sélection 3 premiers jours de juin ---
             start_date = pd.Timestamp(f"{DEFAULT_YEAR}-06-01 00:00:00")
-            end_date = start_date + pd.Timedelta(hours=72)
+            end_date = start_date + pd.Timedelta(hours=120)
 
             df = hourly_df[
                 (hourly_df["datetime"] >= start_date) &
