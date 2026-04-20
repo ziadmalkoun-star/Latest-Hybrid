@@ -460,13 +460,28 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
     }
     return result
 
-def build_summary_table(result: Dict[str, np.ndarray], pv_stats: Dict[str, float]) -> pd.DataFrame:
+able with this version:
+
+def build_summary_table(
+    result: Dict[str, np.ndarray],
+    pv_stats: Dict[str, float],
+    pv_dc_mw: float,
+    batt_power_mw: float,
+) -> pd.DataFrame:
+    pv_revenue = float(result["total_direct_pv_revenue"][0])
+    bess_revenue = float(result["total_batt_sale_revenue"][0]) - float(result["total_grid_charge_cost"][0]) + float(result["nightly_revenue_total"][0])
+
+    pv_rev_keur_per_mw = pv_revenue / max(pv_dc_mw, 1e-12) / 1000.0
+    bess_rev_keur_per_mw = bess_revenue / max(batt_power_mw, 1e-12) / 1000.0
+
     rows = [
         ("Revenu total", float(result["total_revenue"][0]), "EUR"),
-        ("Revenu PV direct", float(result["total_direct_pv_revenue"][0]), "EUR"),
+        ("Revenu PV direct", pv_revenue, "EUR"),
         ("Revenu vente batterie", float(result["total_batt_sale_revenue"][0]), "EUR"),
         ("Coût charge réseau batterie", float(result["total_grid_charge_cost"][0]), "EUR"),
         ("Revenu services système de nuit", float(result["nightly_revenue_total"][0]), "EUR"),
+        ("Revenu PV spécifique", pv_rev_keur_per_mw, "kEUR/MW"),
+        ("Revenu BESS spécifique", bess_rev_keur_per_mw, "kEUR/MW"),
         ("Énergie totale vendue", float(result["energy_sold_total_mwh"][0]), "MWh"),
         ("Énergie shiftée par batterie", float(result["energy_shifted_mwh"][0]), "MWh"),
         ("Énergie PV vendue directement", float(result["pv_direct_sold_mwh"][0]), "MWh"),
@@ -477,7 +492,7 @@ def build_summary_table(result: Dict[str, np.ndarray], pv_stats: Dict[str, float
     ]
     return pd.DataFrame(rows, columns=["Indicateur", "Valeur", "Unité"])
 
-def monthly_dataframe(result: Dict[str, np.ndarray]) -> pd.DataFrame:
+def monthly_dataframe(result: Dict[str, np.ndarray], pv_dc_mw: float, batt_power_mw: float) -> pd.DataFrame:
     idx = pd.date_range(f"{DEFAULT_YEAR}-01-01 00:00:00", periods=HOURS_PER_YEAR, freq="h")
     df = pd.DataFrame({
         "datetime": idx,
@@ -491,7 +506,13 @@ def monthly_dataframe(result: Dict[str, np.ndarray]) -> pd.DataFrame:
     })
     df["month"] = df["datetime"].dt.strftime("%Y-%m")
     monthly = df.groupby("month", as_index=False).sum(numeric_only=True)
-    monthly["net_revenue"] = monthly["pv_direct_revenue"] + monthly["batt_sale_revenue"] - monthly["grid_charge_cost"]
+
+    monthly["bess_net_revenue"] = monthly["batt_sale_revenue"] - monthly["grid_charge_cost"]
+    monthly["net_revenue"] = monthly["pv_direct_revenue"] + monthly["bess_net_revenue"]
+
+    monthly["pv_revenue_keur_per_mw"] = monthly["pv_direct_revenue"] / max(pv_dc_mw, 1e-12) / 1000.0
+    monthly["bess_revenue_keur_per_mw"] = monthly["bess_net_revenue"] / max(batt_power_mw, 1e-12) / 1000.0
+
     return monthly
 
 def to_excel_bytes(summary_df: pd.DataFrame, monthly_df: pd.DataFrame, hourly_df: pd.DataFrame) -> bytes:
@@ -721,8 +742,8 @@ def app():
         with st.spinner("Optimisation économique annuelle en cours..."):
             result = optimize_dispatch_dp(sim_inputs)
 
-        summary_df = build_summary_table(result, pv_stats)
-        monthly_df = monthly_dataframe(result)
+        summary_df = build_summary_table(result, pv_stats, pv_dc_mw, batt_power_mw)
+        monthly_df = monthly_dataframe(result, pv_dc_mw, batt_power_mw)
 
         idx = pd.date_range(f"{DEFAULT_YEAR}-01-01 00:00:00", periods=HOURS_PER_YEAR, freq="h")
         hourly_df = pd.DataFrame({
@@ -844,11 +865,32 @@ def app():
 
         with c2:
             fig2, ax2 = plt.subplots(figsize=(8, 4.5))
-            ax2.plot(monthly_df["month"], monthly_df["net_revenue"])
-            ax2.set_title("Revenu net mensuel")
-            ax2.set_ylabel("EUR")
+        
+            x = np.arange(len(monthly_df))
+            width = 0.38
+        
+            ax2.bar(
+                x - width / 2,
+                monthly_df["pv_revenue_keur_per_mw"],
+                width=width,
+                color="orange",
+                label="PV"
+            )
+            ax2.bar(
+                x + width / 2,
+                monthly_df["bess_revenue_keur_per_mw"],
+                width=width,
+                color="green",
+                label="BESS"
+            )
+        
+            ax2.set_title("Revenus mensuels spécifiques")
+            ax2.set_ylabel("kEUR/MW")
             ax2.set_xlabel("Mois")
-            ax2.tick_params(axis="x", rotation=45)
+            ax2.set_xticks(x)
+            ax2.set_xticklabels(monthly_df["month"], rotation=45)
+            ax2.legend()
+        
             st.pyplot(fig2)
             plt.close(fig2)
 
