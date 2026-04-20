@@ -523,8 +523,8 @@ def monthly_dataframe(result: Dict[str, np.ndarray], pv_dc_mw: float, batt_power
     monthly["pv_revenue_keur_per_mw"] = monthly["pv_direct_revenue"] / max(pv_dc_mw, 1e-12) / 1000.0
     monthly["bess_revenue_keur_per_mw"] = monthly["bess_net_revenue"] / max(batt_power_mw, 1e-12) / 1000.0
 
-    monthly["pv_revenue_keur_per_mwh"] = monthly["pv_direct_revenue"] / monthly["pv_direct_mwh"].clip(lower=1e-12)
-    monthly["bess_revenue_keur_per_mwh"] = monthly["bess_net_revenue"] / monthly["shifted_mwh"].clip(lower=1e-12)
+    monthly["pv_revenue_eur_per_mwh"] = monthly["pv_direct_revenue"] / monthly["pv_direct_mwh"].clip(lower=1e-12)
+    monthly["bess_revenue_eur_per_mwh"] = monthly["bess_net_revenue"] / monthly["shifted_mwh"].clip(lower=1e-12)
 
     return monthly
 
