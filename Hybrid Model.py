@@ -866,45 +866,35 @@ def app():
         
             x = np.arange(len(monthly_df))
         
-            pv_vals = monthly_df["pv_revenue_keur_per_mw"].to_numpy(dtype=float)
             bess_vals = monthly_df["bess_revenue_keur_per_mw"].to_numpy(dtype=float)
+            pv_vals = monthly_df["pv_revenue_keur_per_mw"].to_numpy(dtype=float)
         
-            bottom_vals = np.maximum(pv_vals, bess_vals)
-            top_vals = np.minimum(pv_vals, bess_vals)
+            # BESS = bottom (green)
+            ax2.bar(
+                x,
+                bess_vals,
+                width=0.65,
+                color="green",
+                label="BESS"
+            )
         
-            # draw bottom bar month by month so color matches the technology with highest revenue
-            for i in range(len(monthly_df)):
-                bottom_color = "orange" if pv_vals[i] >= bess_vals[i] else "green"
-                top_color = "green" if pv_vals[i] >= bess_vals[i] else "orange"
-        
-                ax2.bar(
-                    x[i],
-                    bottom_vals[i],
-                    width=0.65,
-                    color=bottom_color,
-                )
-        
-                ax2.bar(
-                    x[i],
-                    top_vals[i],
-                    width=0.65,
-                    bottom=bottom_vals[i],
-                    color=top_color,
-                )
-        
-            # legend
-            from matplotlib.patches import Patch
-            legend_handles = [
-                Patch(facecolor="orange", label="PV"),
-                Patch(facecolor="green", label="BESS"),
-            ]
-            ax2.legend(handles=legend_handles)
+            # PV = stacked on top (orange)
+            ax2.bar(
+                x,
+                pv_vals,
+                width=0.65,
+                bottom=bess_vals,
+                color="orange",
+                label="PV"
+            )
         
             ax2.set_title("Revenus mensuels spécifiques superposés")
             ax2.set_ylabel("kEUR/MW")
             ax2.set_xlabel("Mois")
             ax2.set_xticks(x)
             ax2.set_xticklabels(monthly_df["month"], rotation=45)
+        
+            ax2.legend()
         
             st.pyplot(fig2)
             plt.close(fig2)
