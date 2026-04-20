@@ -479,8 +479,8 @@ def build_summary_table(
     pv_sold_mwh = float(result["pv_direct_sold_mwh"][0])
     bess_sold_mwh = float(result["energy_shifted_mwh"][0])
 
-    pv_rev_keur_per_mwh = pv_revenue / max(pv_sold_mwh, 1e-12)
-    bess_rev_keur_per_mwh = bess_revenue / max(bess_sold_mwh, 1e-12)
+    pv_rev_eur_per_mwh = pv_revenue / max(pv_sold_mwh, 1e-12)
+    bess_rev_eur_per_mwh = bess_revenue / max(bess_sold_mwh, 1e-12)
 
     rows = [
         ("Revenu total", float(result["total_revenue"][0]), "EUR"),
@@ -490,8 +490,8 @@ def build_summary_table(
         ("Revenu services système de nuit", float(result["nightly_revenue_total"][0]), "EUR"),
         ("Revenu PV spécifique", pv_rev_keur_per_mw, "kEUR/MW"),
         ("Revenu BESS spécifique", bess_rev_keur_per_mw, "kEUR/MW"),
-        ("Revenu PV spécifique énergie", pv_rev_keur_per_mwh, "€/MWh"),
-        ("Revenu BESS spécifique énergie", bess_rev_keur_per_mwh, "€/MWh"),
+        ("Revenu PV spécifique énergie", pv_rev_eur_per_mwh, "€/MWh"),
+        ("Revenu BESS spécifique énergie", bess_rev_eur_per_mwh, "€/MWh"),
         ("Énergie totale vendue", float(result["energy_sold_total_mwh"][0]), "MWh"),
         ("Énergie shiftée par batterie", bess_sold_mwh, "MWh"),
         ("Énergie PV vendue directement", pv_sold_mwh, "MWh"),
@@ -952,8 +952,8 @@ def app():
         
             x = np.arange(len(monthly_df))
         
-            bess_vals_mwh = monthly_df["bess_revenue_keur_per_mwh"].to_numpy(dtype=float)
-            pv_vals_mwh = monthly_df["pv_revenue_keur_per_mwh"].to_numpy(dtype=float)
+            bess_vals_mwh = monthly_df["bess_revenue_eur_per_mwh"].to_numpy(dtype=float)
+            pv_vals_mwh = monthly_df["pv_revenue_eur_per_mwh"].to_numpy(dtype=float)
         
             ax5.bar(
                 x,
@@ -973,7 +973,7 @@ def app():
             )
         
             ax5.set_title("Revenus mensuels spécifiques énergie")
-            ax5.set_ylabel("kEUR/MWh")
+            ax5.set_ylabel("EUR/MWh")
             ax5.set_xlabel("Mois")
             ax5.set_xticks(x)
             ax5.set_xticklabels(monthly_df["month"], rotation=45)
