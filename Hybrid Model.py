@@ -479,8 +479,8 @@ def build_summary_table(
     pv_sold_mwh = float(result["pv_direct_sold_mwh"][0])
     bess_sold_mwh = float(result["energy_shifted_mwh"][0])
 
-    pv_rev_keur_per_mwh = pv_revenue / max(pv_sold_mwh, 1e-12)
-    bess_rev_keur_per_mwh = bess_revenue / max(bess_sold_mwh, 1e-12)
+    pv_rev_keur_per_mwh = pv_revenue / max(pv_sold_mwh, 1e-12) / 1000.0
+    bess_rev_keur_per_mwh = bess_revenue / max(bess_sold_mwh, 1e-12) / 1000.0
 
     rows = [
         ("Revenu total", float(result["total_revenue"][0]), "EUR"),
