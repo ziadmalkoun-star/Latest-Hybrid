@@ -460,8 +460,6 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
     }
     return result
 
-able with this version:
-
 def build_summary_table(
     result: Dict[str, np.ndarray],
     pv_stats: Dict[str, float],
