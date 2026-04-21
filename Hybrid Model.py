@@ -60,6 +60,61 @@ def _validate_array_length(arr: np.ndarray, name: str, expected_len: int = HOURS
         raise ValueError(f"{name} contient des valeurs non numériques ou infinies.")
     return arr
 
+def build_combined_soc_with_afrr(
+    result_hourly: Dict[str, np.ndarray],
+    afrr_result: Dict[str, np.ndarray] | None,
+    batt_energy_mwh: float,
+    initial_soc_mwh: float,
+) -> Dict[str, np.ndarray]:
+    """
+    Reconstruct a single battery SOC trajectory including:
+    - hourly wholesale PV/grid charge-discharge
+    - quarter-hour aFRR charge-discharge
+
+    Convention:
+    - hourly wholesale flows are spread evenly across the 4 quarter-hours of each hour
+    - aFRR flows stay on their exact quarter-hours
+    - SOC is clipped between 0 and battery capacity
+    """
+    wholesale_pv_to_batt_h = np.asarray(result_hourly["pv_to_batt"], dtype=float)
+    wholesale_grid_charge_h = np.asarray(result_hourly["grid_charge"], dtype=float)
+    wholesale_discharge_h = np.asarray(result_hourly["discharge"], dtype=float)
+
+    wholesale_charge_h = wholesale_pv_to_batt_h + wholesale_grid_charge_h
+
+    # Spread hourly wholesale flows equally over quarter-hours
+    wholesale_charge_qh = np.repeat(wholesale_charge_h / 4.0, 4)
+    wholesale_discharge_qh = np.repeat(wholesale_discharge_h / 4.0, 4)
+
+    if afrr_result is not None:
+        afrr_charge_qh = np.asarray(afrr_result["afrr_charge_qh_mwh"], dtype=float)
+        afrr_discharge_qh = np.asarray(afrr_result["afrr_discharge_qh_mwh"], dtype=float)
+    else:
+        afrr_charge_qh = np.zeros(QH_PER_YEAR, dtype=float)
+        afrr_discharge_qh = np.zeros(QH_PER_YEAR, dtype=float)
+
+    total_charge_qh = wholesale_charge_qh + afrr_charge_qh
+    total_discharge_qh = wholesale_discharge_qh + afrr_discharge_qh
+
+    soc_qh = np.zeros(QH_PER_YEAR + 1, dtype=float)
+    soc_qh[0] = float(initial_soc_mwh)
+
+    for t in range(QH_PER_YEAR):
+        soc_next = soc_qh[t] + total_charge_qh[t] - total_discharge_qh[t]
+        soc_qh[t + 1] = min(max(soc_next, 0.0), batt_energy_mwh)
+
+    soc_hourly_end = soc_qh[4::4]  # end of each hour
+
+    return {
+        "combined_soc_qh": soc_qh,
+        "combined_soc_hourly_end": soc_hourly_end,
+        "combined_charge_qh": total_charge_qh,
+        "combined_discharge_qh": total_discharge_qh,
+        "wholesale_charge_qh": wholesale_charge_qh,
+        "wholesale_discharge_qh": wholesale_discharge_qh,
+        "afrr_charge_qh": afrr_charge_qh,
+        "afrr_discharge_qh": afrr_discharge_qh,
+    }
 
 def _read_single_column_csv(uploaded_file, expected_len: int = HOURS_PER_YEAR) -> np.ndarray:
     if uploaded_file is None:
@@ -1259,7 +1314,33 @@ def app():
                 afrr_result = simulate_afrr_night_arbitrage(sim_inputs, result)
                 afrr_hourly = aggregate_afrr_qh_to_hourly(afrr_result)
                 final_result = merge_hourly_dispatch_with_afrr(result, afrr_hourly)
+                
+        combined_soc_result = build_combined_soc_with_afrr(
+            result_hourly=result,
+            afrr_result=afrr_result,
+            batt_energy_mwh=sim_inputs.batt_energy_mwh,
+            initial_soc_mwh=sim_inputs.initial_soc_mwh,
+        )
 
+        if not sim_inputs.enable_afrr:
+            combined_soc_result = build_combined_soc_with_afrr(
+                result_hourly=result,
+                afrr_result=None,
+                batt_energy_mwh=sim_inputs.batt_energy_mwh,
+                initial_soc_mwh=sim_inputs.initial_soc_mwh,
+            )
+
+        combined_qh_df = pd.DataFrame({
+            "datetime": build_quarter_hour_index(DEFAULT_YEAR),
+            "combined_charge_qh_mwh": combined_soc_result["combined_charge_qh"],
+            "combined_discharge_qh_mwh": combined_soc_result["combined_discharge_qh"],
+            "wholesale_charge_qh_mwh": combined_soc_result["wholesale_charge_qh"],
+            "wholesale_discharge_qh_mwh": combined_soc_result["wholesale_discharge_qh"],
+            "afrr_charge_qh_mwh": combined_soc_result["afrr_charge_qh"],
+            "afrr_discharge_qh_mwh": combined_soc_result["afrr_discharge_qh"],
+            "battery_soc_mwh_end_qh": combined_soc_result["combined_soc_qh"][1:],
+        })
+        
         summary_df = build_summary_table(final_result, pv_stats, pv_dc_mw, batt_power_mw)
         monthly_df = monthly_dataframe(final_result, pv_dc_mw, batt_power_mw)
 
@@ -1274,11 +1355,7 @@ def app():
             "pv_to_battery_mwh": result["pv_to_batt"],
             "grid_charge_mwh": result["grid_charge"],
             "battery_discharge_mwh": result["discharge"],
-            "battery_soc_mwh_end": (
-                afrr_hourly["afrr_soc_hourly_end_mwh"]
-                if afrr_hourly is not None
-                else result["soc"][1:]
-            ),
+            "battery_soc_mwh_end": combined_soc_result["combined_soc_hourly_end"],
             "pv_direct_revenue_eur": result["pv_direct_revenue"],
             "battery_sale_revenue_eur": result["batt_sale_revenue"],
             "grid_charge_cost_eur": result["grid_charge_cost"],
