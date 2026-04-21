@@ -1274,7 +1274,11 @@ def app():
             "pv_to_battery_mwh": result["pv_to_batt"],
             "grid_charge_mwh": result["grid_charge"],
             "battery_discharge_mwh": result["discharge"],
-            "battery_soc_mwh_end": result["soc"][1:],
+            "battery_soc_mwh_end": (
+                afrr_hourly["afrr_soc_hourly_end_mwh"]
+                if afrr_hourly is not None
+                else result["soc"][1:]
+            ),
             "pv_direct_revenue_eur": result["pv_direct_revenue"],
             "battery_sale_revenue_eur": result["batt_sale_revenue"],
             "grid_charge_cost_eur": result["grid_charge_cost"],
@@ -1351,6 +1355,8 @@ def app():
                 "discharge_threshold_day",
                 "grid_charge_mwh",
                 "battery_discharge_mwh",
+                "afrr_charge_mwh",
+                "afrr_discharge_mwh",
                 "charge_allowed",
                 "discharge_allowed",
             ]],
