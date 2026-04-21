@@ -1391,6 +1391,7 @@ def app():
         k2.metric("Énergie totale vendue", f"{total_energy_display:,.0f} MWh")
         k3.metric("Énergie shiftée", f"{final_result['energy_shifted_mwh'][0]:,.0f} MWh")
         k4.metric("Cycles équivalents", f"{final_result['equivalent_cycles'][0]:,.1f}")
+        k5.metric("Revenu aFRR", f"{monthly_df['afrr_net_revenue'].sum():,.0f} EUR")
 
         st.subheader("Synthèse")
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
@@ -1427,21 +1428,44 @@ def app():
             fig2, ax2 = plt.subplots(figsize=(9, 4.8))
 
             x = np.arange(len(monthly_df))
-            bess_vals = monthly_df["bess_revenue_keur_per_mw"].to_numpy(dtype=float)
-            pv_vals = monthly_df["pv_revenue_keur_per_mw"].to_numpy(dtype=float)
 
-            ax2.bar(x, bess_vals, width=0.65, color="green", label="BESS")
-            ax2.bar(x, pv_vals, width=0.65, bottom=bess_vals, color="orange", label="PV")
-
-            ax2.set_title("Revenus mensuels spécifiques superposés")
-            ax2.set_ylabel("kEUR/MW")
-            ax2.set_xlabel("Mois")
-            ax2.set_xticks(x)
-            ax2.set_xticklabels(monthly_df["month"], rotation=45)
-            ax2.legend()
-
-            st.pyplot(fig2)
-            plt.close(fig2)
+            bess_vals = (
+                monthly_df["bess_revenue_keur_per_mw"]
+                - monthly_df["afrr_net_revenue"] / max(batt_power_mw, 1e-12) / 1000.0
+            )
+            
+            afrr_vals = monthly_df["afrr_net_revenue"] / max(batt_power_mw, 1e-12) / 1000.0
+            
+            pv_vals = monthly_df["pv_revenue_keur_per_mw"]
+            
+            # --- BESS wholesale ---
+            ax2.bar(
+                x,
+                bess_vals,
+                width=0.65,
+                color="green",
+                label="BESS wholesale"
+            )
+            
+            # --- aFRR stacked on BESS ---
+            ax2.bar(
+                x,
+                afrr_vals,
+                width=0.65,
+                bottom=bess_vals,
+                color="blue",
+                label="aFRR"
+            )
+            
+            # --- PV stacked on top ---
+            ax2.bar(
+                x,
+                pv_vals,
+                width=0.65,
+                bottom=bess_vals + afrr_vals,
+                color="orange",
+                label="PV"
+            )
 
         c3, c4 = st.columns(2)
 
@@ -1551,22 +1575,18 @@ def app():
         with c5:
             fig5, ax5 = plt.subplots(figsize=(9, 4.8))
 
-            x = np.arange(len(monthly_df))
-            bess_vals_mwh = monthly_df["bess_revenue_eur_per_mwh"].to_numpy(dtype=float)
-            pv_vals_mwh = monthly_df["pv_revenue_eur_per_mwh"].to_numpy(dtype=float)
-
-            ax5.bar(x, bess_vals_mwh, width=0.65, color="green", label="BESS")
-            ax5.bar(x, pv_vals_mwh, width=0.65, bottom=bess_vals_mwh, color="orange", label="PV")
-
-            ax5.set_title("Revenus mensuels spécifiques énergie")
-            ax5.set_ylabel("EUR/MWh")
-            ax5.set_xlabel("Mois")
-            ax5.set_xticks(x)
-            ax5.set_xticklabels(monthly_df["month"], rotation=45)
-            ax5.legend()
-
-            st.pyplot(fig5)
-            plt.close(fig5)
+            bess_vals_mwh = (
+            monthly_df["bess_revenue_eur_per_mwh"]
+            - monthly_df["afrr_net_revenue"] / monthly_df["shifted_mwh"].clip(lower=1e-12)
+        )
+        
+        afrr_vals_mwh = monthly_df["afrr_net_revenue"] / monthly_df["shifted_mwh"].clip(lower=1e-12)
+        
+        pv_vals_mwh = monthly_df["pv_revenue_eur_per_mwh"]
+        
+        ax5.bar(x, bess_vals_mwh, width=0.65, label="BESS", color="green")
+        ax5.bar(x, afrr_vals_mwh, width=0.65, bottom=bess_vals_mwh, label="aFRR", color="blue")
+        ax5.bar(x, pv_vals_mwh, width=0.65, bottom=bess_vals_mwh + afrr_vals_mwh, label="PV", color="orange")
 
         with c6:
             if afrr_result is not None and afrr_qh_df is not None:
