@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import matplotlib.dates as mdates
+import time
 
 HOURS_PER_YEAR = 8760
 QH_PER_HOUR = 4
@@ -1314,7 +1315,9 @@ def app():
 
     if not run:
         return
-
+        
+    start_time = time.time()
+    
     try:
         if batt_energy_mwh < batt_power_mw and batt_energy_mwh > 0:
             st.warning("Attention : la capacité batterie est inférieure à 1h de puissance. C'est possible, mais atypique.")
@@ -1608,7 +1611,19 @@ def app():
             afrr_qh_df=afrr_qh_df,
             afrr_daily_log_df=afrr_result["afrr_daily_log"] if afrr_result is not None else None,
         )
+        end_time = time.time()
+        elapsed_time = end_time - start_time
 
+        if elapsed_time < 60:
+            optimization_time_str = f"{elapsed_time:.2f} seconds"
+        else:
+            minutes = int(elapsed_time // 60)
+            seconds = int(elapsed_time % 60)
+            optimization_time_str = f"{minutes} min {seconds} sec"
+
+        st.subheader("Optimization Time")
+        st.write(optimization_time_str)
+        
         st.success("Simulation terminée.")
 
         k1, k2, k3, k4 = st.columns(4)
