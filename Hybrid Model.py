@@ -1376,7 +1376,7 @@ def app():
 
         st.success("Simulation terminée.")
 
-        k1, k2, k3, k4 = st.columns(4)
+        k1, k2, k3, k4, k5 = st.columns(5)
         total_revenue_display = (
             final_result["total_revenue_including_afrr_eur"][0]
             if "total_revenue_including_afrr_eur" in final_result
