@@ -2087,6 +2087,40 @@ def app():
             else:
                 st.info("Activez l'aFRR et uploadez les deux fichiers quart-horaires pour afficher le graphique aFRR.")
 
+        st.subheader("Comparaison Revenu PV-only vs Hybrid")
+
+        fig_cmp, ax_cmp = plt.subplots(figsize=(10, 5))
+
+        x = np.arange(len(monthly_df))
+
+        pv_only_monthly_eur = monthly_df["pv_only_revenue"].to_numpy(dtype=float)
+        hybrid_monthly_eur = monthly_df["net_revenue"].to_numpy(dtype=float)
+
+        ax_cmp.plot(
+            x,
+            pv_only_monthly_eur,
+            marker="o",
+            linewidth=2.0,
+            label="PV-only"
+        )
+
+        ax_cmp.plot(
+            x,
+            hybrid_monthly_eur,
+            marker="o",
+            linewidth=2.0,
+            label="Hybrid"
+        )
+
+        ax_cmp.set_title("Comparaison Revenu PV-only vs Hybrid")
+        ax_cmp.set_ylabel("EUR")
+        ax_cmp.set_xlabel("Mois")
+        ax_cmp.set_xticks(x)
+        ax_cmp.set_xticklabels(monthly_df["month"], rotation=45)
+        ax_cmp.legend()
+
+        st.pyplot(fig_cmp)
+        plt.close(fig_cmp)
 
         st.subheader("Table mensuelle")
         st.dataframe(monthly_df, use_container_width=True, hide_index=True)
