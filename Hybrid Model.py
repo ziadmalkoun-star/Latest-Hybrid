@@ -2005,14 +2005,30 @@ def app():
             fig5, ax5 = plt.subplots(figsize=(9, 4.8))
 
             x = np.arange(len(monthly_df))
-            pv_vals_mwh = monthly_df["pv_revenue_eur_per_mwh"].to_numpy(dtype=float)
-            afrr_energy_base = monthly_df["bess_total_discharged_mwh"].clip(lower=1e-12).to_numpy(dtype=float)
-            afrr_vals_mwh = monthly_df["afrr_net_revenue"].to_numpy(dtype=float) / afrr_energy_base
-            bess_vals_mwh = monthly_df["bess_revenue_eur_per_mwh"].to_numpy(dtype=float) - afrr_vals_mwh
+            width = 0.38
 
-            ax5.bar(x, bess_vals_mwh, width=0.65, color="green", label="BESS")
-            ax5.bar(x, afrr_vals_mwh, width=0.65, bottom=bess_vals_mwh, color="blue", label="aFRR")
-            ax5.bar(x, pv_vals_mwh, width=0.65, bottom=bess_vals_mwh + afrr_vals_mwh, color="orange", label="PV")
+            # PV revenue in EUR/MWh
+            pv_vals_mwh = monthly_df["pv_revenue_eur_per_mwh"].to_numpy(dtype=float)
+
+            # Total BESS revenue in EUR/MWh
+            bess_vals_mwh = monthly_df["bess_revenue_eur_per_mwh"].to_numpy(dtype=float)
+
+            # Side-by-side bars
+            ax5.bar(
+                x - width / 2,
+                pv_vals_mwh,
+                width=width,
+                color="orange",
+                label="PV"
+            )
+
+            ax5.bar(
+                x + width / 2,
+                bess_vals_mwh,
+                width=width,
+                color="green",
+                label="BESS"
+            )
 
             ax5.set_title("Revenus mensuels spécifiques énergie")
             ax5.set_ylabel("EUR/MWh")
@@ -2058,39 +2074,6 @@ def app():
             else:
                 st.info("Activez l'aFRR et uploadez les deux fichiers quart-horaires pour afficher le graphique aFRR.")
 
-        st.subheader("Projet PV-only Project - 3 premiers jours de juin")
-        pv_only_start = pd.Timestamp(f"{DEFAULT_YEAR}-06-01 00:00:00")
-        pv_only_end = pv_only_start + pd.Timedelta(days=3)
-
-        df_pv_only = hourly_df[
-            (hourly_df["datetime"] >= pv_only_start) &
-            (hourly_df["datetime"] < pv_only_end)
-        ].copy()
-
-        fig_pv_only, ax_pv_only = plt.subplots(figsize=(12, 4.8))
-        ax_pv_only.fill_between(
-            df_pv_only["datetime"],
-            df_pv_only["pv_only_direct_mwh"],
-            color="orange",
-            alpha=0.5,
-            label="PV-only → Réseau"
-        )
-        ax_pv_only.plot(
-            df_pv_only["datetime"],
-            df_pv_only["pv_only_direct_mwh"],
-            color="orange",
-            linewidth=1.8
-        )
-        ax_pv_only.set_ylabel("Énergie (MWh)")
-        ax_pv_only.set_xlabel("Heure")
-        ax_pv_only.set_title("Projet PV-only Project - 3 premiers jours de juin")
-        ax_pv_only.xaxis.set_major_locator(mdates.HourLocator(interval=6))
-        ax_pv_only.xaxis.set_major_formatter(mdates.DateFormatter("%d %Hh"))
-        ax_pv_only.tick_params(axis="x", rotation=45)
-        ax_pv_only.legend()
-
-        st.pyplot(fig_pv_only)
-        plt.close(fig_pv_only)
 
         st.subheader("Table mensuelle")
         st.dataframe(monthly_df, use_container_width=True, hide_index=True)
