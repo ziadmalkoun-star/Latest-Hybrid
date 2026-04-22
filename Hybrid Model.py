@@ -461,7 +461,7 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
 
                         if discharge_candidate > 0:
                             throughput = abs(delta_soc)
-                            cycle_penalty = discharge_candidate * inputs.cycle_cost_eur_per_mwh
+                            cycle_penalty = (throughput / max(inputs.batt_energy_mwh, 1e-12)) * inputs.cycle_cost_eur_per_mwh
 
                     reward = pv_direct_candidate * pv_price_t
 
