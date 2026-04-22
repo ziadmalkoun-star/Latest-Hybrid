@@ -1164,7 +1164,7 @@ def build_summary_table(
 
     rows = [
         ("Revenu total", total_revenue, "EUR"),
-        ("Revenu Projet PV-only Project", pure_pv_revenue, "EUR"),
+        ("Revenu PV-only Project", pure_pv_revenue, "EUR"),
         ("Valeur ajoutée de l'hybridation vs PV-only", hybrid_added_value, "EUR"),
         ("Revenu PV direct", pv_revenue, "EUR"),
         ("Revenu batterie wholesale", float(result["total_batt_sale_revenue"][0]), "EUR"),
