@@ -2209,7 +2209,7 @@ def app():
                 hybrid_monthly_keur,
                 marker="o",
                 linewidth=2.0,
-                label="Hybrid (PV + BESS + aFRR)"
+                label="Hybrid (PV + BESS)"
             )
 
             ax_cmp.set_title("Comparaison Revenu PV-only vs Hybrid")
