@@ -2005,13 +2005,17 @@ def app():
             fig5, ax5 = plt.subplots(figsize=(9, 4.8))
 
             x = np.arange(len(monthly_df))
-            width = 0.38
+            width = 0.34
 
-            # PV revenue in EUR/MWh
+            # Existing hybrid metrics
             pv_vals_mwh = monthly_df["pv_revenue_eur_per_mwh"].to_numpy(dtype=float)
-
-            # Total BESS revenue in EUR/MWh
             bess_vals_mwh = monthly_df["bess_revenue_eur_per_mwh"].to_numpy(dtype=float)
+
+            # PV-only reference in EUR/MWh
+            pv_only_vals_mwh = (
+                monthly_df["pv_only_revenue"].to_numpy(dtype=float)
+                / monthly_df["pv_only_direct_mwh"].clip(lower=1e-12).to_numpy(dtype=float)
+            )
 
             # Side-by-side bars
             ax5.bar(
@@ -2019,7 +2023,7 @@ def app():
                 pv_vals_mwh,
                 width=width,
                 color="orange",
-                label="PV"
+                label="PV hybride"
             )
 
             ax5.bar(
@@ -2028,6 +2032,15 @@ def app():
                 width=width,
                 color="green",
                 label="BESS"
+            )
+
+            # PV-only reference curve with monthly markers
+            ax5.plot(
+                x,
+                pv_only_vals_mwh,
+                marker="o",
+                linewidth=2.0,
+                label="PV-only Project"
             )
 
             ax5.set_title("Revenus mensuels spécifiques énergie")
