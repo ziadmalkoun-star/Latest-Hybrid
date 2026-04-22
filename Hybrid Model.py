@@ -1248,8 +1248,41 @@ def monthly_dataframe(
 
     return monthly
 
+def build_inputs_dataframe(inputs: SimulationInputs) -> pd.DataFrame:
+    rows = [
+        ("batt_power_mw", inputs.batt_power_mw),
+        ("batt_energy_mwh", inputs.batt_energy_mwh),
+        ("pv_dc_mw", inputs.pv_dc_mw),
+        ("productible_kwh_per_kwp", inputs.productible_kwh_per_kwp),
+        ("pv_losses_pct", inputs.pv_losses_pct),
+        ("plant_availability_pct", inputs.plant_availability_pct),
+        ("eta_charge", inputs.eta_charge),
+        ("eta_discharge", inputs.eta_discharge),
+        ("nightly_bess_revenue_eur", inputs.nightly_bess_revenue_eur),
+        ("soc_steps", inputs.soc_steps),
+        ("initial_soc_mwh", inputs.initial_soc_mwh),
+        ("final_soc_mwh", inputs.final_soc_mwh),
+        ("grid_export_limit_mw", inputs.grid_export_limit_mw),
+        ("cycle_cost_eur_per_mwh", inputs.cycle_cost_eur_per_mwh),
+        ("charge_quantile", inputs.charge_quantile),
+        ("discharge_quantile", inputs.discharge_quantile),
+        ("max_cycles_per_day", inputs.max_cycles_per_day),
+        ("min_spread_arbitrage_eur_per_mwh", inputs.min_spread_arbitrage_eur_per_mwh),
+        ("pv_capture_rate_pct", inputs.pv_capture_rate_pct),
+        ("bess_capture_rate_pct", inputs.bess_capture_rate_pct),
+        ("enable_afrr", inputs.enable_afrr),
+        ("afrr_min_spread_eur_per_mwh", inputs.afrr_min_spread_eur_per_mwh),
+        ("afrr_cycle_cost_eur_per_mwh", inputs.afrr_cycle_cost_eur_per_mwh),
+        ("afrr_max_events_per_day", inputs.afrr_max_events_per_day),
+        ("afrr_night_start_hour", inputs.afrr_night_start_hour),
+        ("afrr_night_end_hour", inputs.afrr_night_end_hour),
+        ("afrr_pv_zero_tolerance_mwh", inputs.afrr_pv_zero_tolerance_mwh),
+        ("afrr_n_qh_per_side", inputs.afrr_n_qh_per_side),
+    ]
+    return pd.DataFrame(rows, columns=["Parameter", "Value"])
 
 def to_excel_bytes(
+    inputs_df: pd.DataFrame,
     summary_df: pd.DataFrame,
     monthly_df: pd.DataFrame,
     hourly_df: pd.DataFrame,
@@ -1259,15 +1292,16 @@ def to_excel_bytes(
     output = io.BytesIO()
     try:
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            summary_df.to_excel(writer, sheet_name="Synthese", index=False)
-            monthly_df.to_excel(writer, sheet_name="Mensuel", index=False)
-            hourly_df.to_excel(writer, sheet_name="Horaire", index=False)
+            inputs_df.to_excel(writer, sheet_name="Inputs", index=False)
+            summary_df.to_excel(writer, sheet_name="Summary", index=False)
+            monthly_df.to_excel(writer, sheet_name="Monthly", index=False)
+            hourly_df.to_excel(writer, sheet_name="Hourly", index=False)
 
             if afrr_qh_df is not None:
                 afrr_qh_df.to_excel(writer, sheet_name="aFRR_QH", index=False)
 
             if afrr_daily_log_df is not None:
-                afrr_daily_log_df.to_excel(writer, sheet_name="aFRR_Journalier", index=False)
+                afrr_daily_log_df.to_excel(writer, sheet_name="aFRR_Daily_Log", index=False)
     except ImportError:
         raise ImportError("Le package openpyxl n'est pas installé. Ajoute 'openpyxl' dans requirements.txt.")
     return output.getvalue()
@@ -1603,7 +1637,9 @@ def app():
             afrr_pv_zero_tolerance_mwh=PV_ZERO_TOLERANCE_MWH,
             afrr_n_qh_per_side=4,
         )
-
+        
+        inputs_df = build_inputs_dataframe(sim_inputs)
+        
         with st.spinner("Optimisation économique annuelle en cours..."):
             result = optimize_dispatch_dp(sim_inputs)
 
@@ -1835,9 +1871,10 @@ def app():
         )
 
         excel_bytes = to_excel_bytes(
-            summary_df,
-            monthly_df,
-            hourly_df,
+            inputs_df=inputs_df,
+            summary_df=summary_df,
+            monthly_df=monthly_df,
+            hourly_df=hourly_df,
             afrr_qh_df=afrr_qh_df,
             afrr_daily_log_df=afrr_result["afrr_daily_log"] if afrr_result is not None else None,
         )
@@ -2190,9 +2227,9 @@ def app():
 
         st.subheader("Exports")
         st.download_button(
-            "Télécharger les résultats en Excel",
+            "Télécharger cette simulation complète (Excel)",
             data=excel_bytes,
-            file_name="revenus_hybride_pv_batterie.xlsx",
+            file_name="simulation_complete_hybride_pv_bess.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         st.download_button(
