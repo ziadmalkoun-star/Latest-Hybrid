@@ -2089,16 +2089,17 @@ def app():
 
         st.subheader("Comparaison Revenu PV-only vs Hybrid")
 
-        fig_cmp, ax_cmp = plt.subplots(figsize=(10, 5))
+        fig_cmp, ax_cmp = plt.subplots(figsize=(9, 4.8))
 
         x = np.arange(len(monthly_df))
 
-        pv_only_monthly_eur = monthly_df["pv_only_revenue"].to_numpy(dtype=float)
-        hybrid_monthly_eur = monthly_df["net_revenue"].to_numpy(dtype=float)
+        # Convert to kEUR
+        pv_only_monthly_keur = monthly_df["pv_only_revenue"].to_numpy(dtype=float) / 1000.0
+        hybrid_monthly_keur = monthly_df["net_revenue"].to_numpy(dtype=float) / 1000.0
 
         ax_cmp.plot(
             x,
-            pv_only_monthly_eur,
+            pv_only_monthly_keur,
             marker="o",
             linewidth=2.0,
             label="PV-only"
@@ -2106,14 +2107,14 @@ def app():
 
         ax_cmp.plot(
             x,
-            hybrid_monthly_eur,
+            hybrid_monthly_keur,
             marker="o",
             linewidth=2.0,
-            label="Hybrid"
+            label="Hybrid (PV + BESS + aFRR)"
         )
 
         ax_cmp.set_title("Comparaison Revenu PV-only vs Hybrid")
-        ax_cmp.set_ylabel("EUR")
+        ax_cmp.set_ylabel("kEUR")
         ax_cmp.set_xlabel("Mois")
         ax_cmp.set_xticks(x)
         ax_cmp.set_xticklabels(monthly_df["month"], rotation=45)
