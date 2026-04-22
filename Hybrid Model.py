@@ -26,9 +26,12 @@ class SimulationInputs:
     plant_availability_pct: float
     eta_charge: float
     eta_discharge: float
+
+    # Effective prices used by the optimizer/economics
     pv_price: np.ndarray
     batt_sell_price: np.ndarray
     grid_buy_price: np.ndarray
+
     solar_profile: np.ndarray  # production PV nette horaire en MWh
     nightly_bess_revenue_eur: float
     soc_steps: int
@@ -41,7 +44,11 @@ class SimulationInputs:
     max_cycles_per_day: float
     min_spread_arbitrage_eur_per_mwh: float
 
-    # aFRR inputs
+    # Capture rates
+    pv_capture_rate_pct: float = 100.0
+    bess_capture_rate_pct: float = 100.0
+
+    # aFRR inputs (effective prices used by economics)
     enable_afrr: bool = False
     afrr_charge_price_qh: np.ndarray | None = None
     afrr_discharge_price_qh: np.ndarray | None = None
@@ -1127,6 +1134,8 @@ def build_summary_table(
     pure_pv_benchmark: Dict[str, np.ndarray],
     pv_dc_mw: float,
     batt_power_mw: float,
+    pv_capture_rate_pct: float,
+    bess_capture_rate_pct: float,
 ) -> pd.DataFrame:
     pv_revenue = float(result["total_direct_pv_revenue"][0])
 
@@ -1163,6 +1172,8 @@ def build_summary_table(
     bess_rev_eur_per_mwh = bess_revenue_total / max(bess_total_discharged_mwh, 1e-12)
 
     rows = [
+        ("PV Capture Rate", pv_capture_rate_pct, "%"),
+        ("BESS Capture Rate", bess_capture_rate_pct, "%"),
         ("Revenu total", total_revenue, "EUR"),
         ("Revenu PV-only Project", pure_pv_revenue, "EUR"),
         ("Valeur ajoutée de l'hybridation vs PV-only", hybrid_added_value, "EUR"),
@@ -1171,7 +1182,7 @@ def build_summary_table(
         ("Coût charge réseau wholesale", float(result["total_grid_charge_cost"][0]), "EUR"),
         ("Revenu services système de nuit", float(result["nightly_revenue_total"][0]), "EUR"),
         ("Revenu brut aFRR", afrr_sale_revenue, "EUR"),
-        ("Coût charge aFRR", afrr_charge_cost, "EUR"),
+        ("Cashflow charge aFRR", afrr_charge_cost, "EUR"),
         ("Coût cycle aFRR", afrr_cycle_cost, "EUR"),
         ("Revenu net aFRR", afrr_net_revenue, "EUR"),
         ("Revenu PV spécifique", pv_rev_keur_per_mw, "kEUR/MW"),
@@ -1282,6 +1293,9 @@ def app():
               2. le prix dépasse le coût moyen stocké + le spread minimum
             - En cas de conflit de décharge wholesale / aFRR, un arbitrage quart-horaire choisit le marché au prix de décharge le plus élevé.
             - Un benchmark **PV-only Project** est aussi calculé pour comparer la valeur ajoutée de l'hybridation.
+            - Les **capture rates** appliquent une réduction globale aux prix effectivement monétisés:
+              - PV Capture Rate sur les prix PV
+              - BESS Capture Rate sur les prix wholesale batterie et aFRR
             """
         )
 
@@ -1309,12 +1323,26 @@ def app():
         availability_pct = st.number_input("Disponibilité globale centrale (%)", min_value=0.0, max_value=100.0, value=98.0, step=0.1)
         eta_charge = st.number_input("Rendement de charge batterie (%)", min_value=1.0, max_value=100.0, value=95.0, step=0.5) / 100.0
         eta_discharge = st.number_input("Rendement de décharge batterie (%)", min_value=1.0, max_value=100.0, value=95.0, step=0.5) / 100.0
+        pv_capture_rate_pct = st.number_input(
+            "PV Capture Rate (%)",
+            min_value=0.0,
+            max_value=100.0,
+            value=100.0,
+            step=1.0,
+        )
 
     with col3:
         nightly_bess_revenue = st.number_input("Revenu services système nuit (EUR/nuit)", min_value=0.0, value=0.0, step=10.0)
         soc_steps = st.slider("Nombre de pas de SOC pour l'optimisation", min_value=21, max_value=201, value=101, step=10)
         initial_soc = st.number_input("SOC initial batterie (MWh)", min_value=0.0, value=0.0, step=1.0)
         final_soc = st.number_input("SOC final cible batterie (MWh)", min_value=0.0, value=0.0, step=1.0)
+        bess_capture_rate_pct = st.number_input(
+            "BESS Capture Rate (%)",
+            min_value=0.0,
+            max_value=100.0,
+            value=100.0,
+            step=1.0,
+        )
 
     st.subheader("Courbe solaire 8760h")
     solar_mode = st.radio(
@@ -1488,41 +1516,56 @@ def app():
                     "annual_losses_mwh": float(max(annual_dc - annual_net, 0.0)),
                 }
 
-        pv_price_curve = (
+        # Raw price curves
+        pv_price_curve_raw = (
             _make_flat_curve(pv_price_value)
             if pv_price_mode == "Prix moyen annuel"
             else _read_single_column_csv(pv_price_upload)
         )
 
-        pure_pv_benchmark = build_pure_pv_benchmark(
-            pv_generation_mwh=pv_hourly_mwh,
-            pv_price=pv_price_curve,
-            grid_export_limit_mw=grid_export_limit_mw,
-        )
-
-        batt_sell_curve = (
+        batt_sell_curve_raw = (
             _make_flat_curve(batt_sell_value)
             if batt_sell_mode == "Prix moyen annuel"
             else _read_single_column_csv(batt_sell_upload)
         )
 
         if grid_mode == "Identique au prix vente batterie":
-            grid_buy_curve = batt_sell_curve.copy()
+            grid_buy_curve_raw = batt_sell_curve_raw.copy()
         elif grid_mode == "Prix moyen annuel":
-            grid_buy_curve = _make_flat_curve(grid_buy_value)
+            grid_buy_curve_raw = _make_flat_curve(grid_buy_value)
         else:
-            grid_buy_curve = _read_single_column_csv(grid_buy_upload)
+            grid_buy_curve_raw = _read_single_column_csv(grid_buy_upload)
 
-        afrr_charge_curve_qh = None
-        afrr_discharge_curve_qh = None
+        afrr_charge_curve_qh_raw = None
+        afrr_discharge_curve_qh_raw = None
 
         if enable_afrr:
             if afrr_charge_upload is None or afrr_discharge_upload is None:
                 st.error("Merci d'uploader les deux CSV aFRR quart-horaires.")
                 return
 
-            afrr_charge_curve_qh = _read_single_column_csv_qh(afrr_charge_upload)
-            afrr_discharge_curve_qh = _read_single_column_csv_qh(afrr_discharge_upload)
+            afrr_charge_curve_qh_raw = _read_single_column_csv_qh(afrr_charge_upload)
+            afrr_discharge_curve_qh_raw = _read_single_column_csv_qh(afrr_discharge_upload)
+
+        # Effective price curves after capture rates
+        pv_capture_factor = pv_capture_rate_pct / 100.0
+        bess_capture_factor = bess_capture_rate_pct / 100.0
+
+        pv_price_curve_effective = pv_price_curve_raw * pv_capture_factor
+        batt_sell_curve_effective = batt_sell_curve_raw * bess_capture_factor
+        grid_buy_curve_effective = grid_buy_curve_raw * bess_capture_factor
+
+        afrr_charge_curve_qh_effective = None
+        afrr_discharge_curve_qh_effective = None
+        if enable_afrr:
+            afrr_charge_curve_qh_effective = afrr_charge_curve_qh_raw * bess_capture_factor
+            afrr_discharge_curve_qh_effective = afrr_discharge_curve_qh_raw * bess_capture_factor
+
+        pure_pv_benchmark = build_pure_pv_benchmark(
+            pv_generation_mwh=pv_hourly_mwh,
+            pv_price=pv_price_curve_effective,
+            grid_export_limit_mw=grid_export_limit_mw,
+        )
 
         sim_inputs = SimulationInputs(
             batt_power_mw=batt_power_mw,
@@ -1533,9 +1576,9 @@ def app():
             plant_availability_pct=availability_pct,
             eta_charge=eta_charge,
             eta_discharge=eta_discharge,
-            pv_price=pv_price_curve,
-            batt_sell_price=batt_sell_curve,
-            grid_buy_price=grid_buy_curve,
+            pv_price=pv_price_curve_effective,
+            batt_sell_price=batt_sell_curve_effective,
+            grid_buy_price=grid_buy_curve_effective,
             solar_profile=pv_hourly_mwh,
             nightly_bess_revenue_eur=nightly_bess_revenue,
             soc_steps=soc_steps,
@@ -1547,9 +1590,11 @@ def app():
             discharge_quantile=discharge_quantile,
             max_cycles_per_day=max_cycles,
             min_spread_arbitrage_eur_per_mwh=min_spread_arbitrage,
+            pv_capture_rate_pct=pv_capture_rate_pct,
+            bess_capture_rate_pct=bess_capture_rate_pct,
             enable_afrr=enable_afrr,
-            afrr_charge_price_qh=afrr_charge_curve_qh,
-            afrr_discharge_price_qh=afrr_discharge_curve_qh,
+            afrr_charge_price_qh=afrr_charge_curve_qh_effective,
+            afrr_discharge_price_qh=afrr_discharge_curve_qh_effective,
             afrr_min_spread_eur_per_mwh=afrr_min_spread,
             afrr_cycle_cost_eur_per_mwh=afrr_cycle_cost,
             afrr_max_events_per_day=int(afrr_max_events_per_day),
@@ -1626,18 +1671,29 @@ def app():
             })
             combined_soc_hourly_end = combined_soc_result["combined_soc_hourly_end"]
 
-        summary_df = build_summary_table(final_result, pv_stats, pure_pv_benchmark, pv_dc_mw, batt_power_mw)
+        summary_df = build_summary_table(
+            final_result,
+            pv_stats,
+            pure_pv_benchmark,
+            pv_dc_mw,
+            batt_power_mw,
+            pv_capture_rate_pct,
+            bess_capture_rate_pct,
+        )
         monthly_df = monthly_dataframe(final_result, pure_pv_benchmark, pv_dc_mw, batt_power_mw)
 
         idx = pd.date_range(f"{DEFAULT_YEAR}-01-01 00:00:00", periods=HOURS_PER_YEAR, freq="h")
         hourly_df = pd.DataFrame({
             "datetime": idx,
             "pv_generation_mwh": pv_hourly_mwh,
-            "pv_price_eur_per_mwh": pv_price_curve,
+            "pv_price_raw_eur_per_mwh": pv_price_curve_raw,
+            "pv_price_effective_eur_per_mwh": pv_price_curve_effective,
             "pv_only_direct_mwh": pure_pv_benchmark["pv_only_direct_mwh"],
             "pv_only_revenue_eur": pure_pv_benchmark["pv_only_revenue_eur"],
-            "battery_sell_price_eur_per_mwh": batt_sell_curve,
-            "grid_buy_price_eur_per_mwh": grid_buy_curve,
+            "battery_sell_price_raw_eur_per_mwh": batt_sell_curve_raw,
+            "battery_sell_price_effective_eur_per_mwh": batt_sell_curve_effective,
+            "grid_buy_price_raw_eur_per_mwh": grid_buy_curve_raw,
+            "grid_buy_price_effective_eur_per_mwh": grid_buy_curve_effective,
             "pv_direct_mwh": final_result["pv_direct"],
             "pv_to_battery_mwh": final_result["pv_to_batt"],
             "grid_charge_mwh": final_result["grid_charge"],
@@ -1655,14 +1711,18 @@ def app():
             "afrr_sale_revenue_eur": final_result["afrr_sale_revenue_hourly_eur"] if "afrr_sale_revenue_hourly_eur" in final_result else np.zeros(HOURS_PER_YEAR),
             "afrr_cycle_cost_eur": final_result["afrr_cycle_cost_hourly_eur"] if "afrr_cycle_cost_hourly_eur" in final_result else np.zeros(HOURS_PER_YEAR),
             "afrr_net_revenue_eur": final_result["afrr_net_revenue_hourly_eur"] if "afrr_net_revenue_hourly_eur" in final_result else np.zeros(HOURS_PER_YEAR),
+            "pv_capture_rate_pct": np.full(HOURS_PER_YEAR, pv_capture_rate_pct),
+            "bess_capture_rate_pct": np.full(HOURS_PER_YEAR, bess_capture_rate_pct),
         })
 
         afrr_qh_df = None
         if reconciliation is not None:
             afrr_qh_df = pd.DataFrame({
                 "datetime": reconciliation["datetime_qh"],
-                "afrr_charge_price_eur_per_mwh": sim_inputs.afrr_charge_price_qh,
-                "afrr_discharge_price_eur_per_mwh": sim_inputs.afrr_discharge_price_qh,
+                "afrr_charge_price_raw_eur_per_mwh": afrr_charge_curve_qh_raw if afrr_charge_curve_qh_raw is not None else np.zeros(QH_PER_YEAR),
+                "afrr_charge_price_effective_eur_per_mwh": sim_inputs.afrr_charge_price_qh,
+                "afrr_discharge_price_raw_eur_per_mwh": afrr_discharge_curve_qh_raw if afrr_discharge_curve_qh_raw is not None else np.zeros(QH_PER_YEAR),
+                "afrr_discharge_price_effective_eur_per_mwh": sim_inputs.afrr_discharge_price_qh,
                 "afrr_charge_mwh": reconciliation["afrr_charge_qh_mwh"],
                 "afrr_discharge_mwh": reconciliation["afrr_discharge_qh_mwh"],
                 "wholesale_discharge_mwh": reconciliation["wholesale_discharge_qh_mwh"],
@@ -1673,6 +1733,7 @@ def app():
                 "afrr_sale_revenue_eur": reconciliation["afrr_sale_revenue_qh_eur"],
                 "afrr_cycle_cost_eur": reconciliation["afrr_cycle_cost_qh_eur"],
                 "afrr_net_revenue_eur": reconciliation["afrr_net_revenue_qh_eur"],
+                "bess_capture_rate_pct": np.full(QH_PER_YEAR, bess_capture_rate_pct),
             })
 
         debug = hourly_df[
@@ -1682,15 +1743,15 @@ def app():
 
         thresholds_debug = hourly_df[[
             "datetime",
-            "grid_buy_price_eur_per_mwh",
-            "battery_sell_price_eur_per_mwh",
+            "grid_buy_price_effective_eur_per_mwh",
+            "battery_sell_price_effective_eur_per_mwh",
         ]].copy()
 
         thresholds_debug["day"] = thresholds_debug["datetime"].dt.date
-        thresholds_debug["charge_threshold_day"] = thresholds_debug.groupby("day")["grid_buy_price_eur_per_mwh"].transform(
+        thresholds_debug["charge_threshold_day"] = thresholds_debug.groupby("day")["grid_buy_price_effective_eur_per_mwh"].transform(
             lambda x: np.percentile(x, charge_quantile)
         )
-        thresholds_debug["discharge_threshold_day"] = thresholds_debug.groupby("day")["battery_sell_price_eur_per_mwh"].transform(
+        thresholds_debug["discharge_threshold_day"] = thresholds_debug.groupby("day")["battery_sell_price_effective_eur_per_mwh"].transform(
             lambda x: np.percentile(x, discharge_quantile)
         )
 
@@ -1705,12 +1766,12 @@ def app():
         )
 
         debug["day"] = debug["datetime"].dt.date
-        debug["charge_allowed"] = debug["grid_buy_price_eur_per_mwh"] <= debug["charge_threshold_day"]
-        debug["discharge_allowed_quantile_only"] = debug["battery_sell_price_eur_per_mwh"] >= debug["discharge_threshold_day"]
-        debug["discharge_allowed_spread_only"] = debug["battery_sell_price_eur_per_mwh"] >= debug["required_discharge_price_eur_per_mwh"].fillna(1e30)
+        debug["charge_allowed"] = debug["grid_buy_price_effective_eur_per_mwh"] <= debug["charge_threshold_day"]
+        debug["discharge_allowed_quantile_only"] = debug["battery_sell_price_effective_eur_per_mwh"] >= debug["discharge_threshold_day"]
+        debug["discharge_allowed_spread_only"] = debug["battery_sell_price_effective_eur_per_mwh"] >= debug["required_discharge_price_eur_per_mwh"].fillna(1e30)
         debug["discharge_allowed_final"] = (
-            (debug["battery_sell_price_eur_per_mwh"] >= debug["discharge_threshold_day"]) &
-            (debug["battery_sell_price_eur_per_mwh"] >= debug["required_discharge_price_eur_per_mwh"].fillna(1e30))
+            (debug["battery_sell_price_effective_eur_per_mwh"] >= debug["discharge_threshold_day"]) &
+            (debug["battery_sell_price_effective_eur_per_mwh"] >= debug["required_discharge_price_eur_per_mwh"].fillna(1e30))
         )
 
         st.subheader("Debug dispatch (3 premiers jours de juin)")
@@ -1718,9 +1779,11 @@ def app():
             debug[[
                 "datetime",
                 "battery_soc_mwh_end",
-                "grid_buy_price_eur_per_mwh",
+                "grid_buy_price_raw_eur_per_mwh",
+                "grid_buy_price_effective_eur_per_mwh",
                 "charge_threshold_day",
-                "battery_sell_price_eur_per_mwh",
+                "battery_sell_price_raw_eur_per_mwh",
+                "battery_sell_price_effective_eur_per_mwh",
                 "discharge_threshold_day",
                 "required_discharge_price_eur_per_mwh",
                 "grid_charge_mwh",
@@ -1837,8 +1900,10 @@ def app():
                 st.dataframe(
                     afrr_debug_qh[[
                         "datetime",
-                        "afrr_charge_price_eur_per_mwh",
-                        "afrr_discharge_price_eur_per_mwh",
+                        "afrr_charge_price_raw_eur_per_mwh",
+                        "afrr_charge_price_effective_eur_per_mwh",
+                        "afrr_discharge_price_raw_eur_per_mwh",
+                        "afrr_discharge_price_effective_eur_per_mwh",
                         "afrr_charge_mwh",
                         "afrr_discharge_mwh",
                         "wholesale_discharge_mwh",
@@ -1984,10 +2049,10 @@ def app():
             ax2 = ax1.twinx()
             ax2.plot(
                 df_plot["datetime"],
-                df_plot["pv_price_eur_per_mwh"],
+                df_plot["pv_price_effective_eur_per_mwh"],
                 linestyle="--",
                 alpha=0.7,
-                label="Prix spot"
+                label="Prix spot PV effectif"
             )
             ax2.set_ylabel("Prix (EUR/MWh)")
 
@@ -2007,17 +2072,13 @@ def app():
             x = np.arange(len(monthly_df))
             width = 0.34
 
-            # Existing hybrid metrics
             pv_vals_mwh = monthly_df["pv_revenue_eur_per_mwh"].to_numpy(dtype=float)
             bess_vals_mwh = monthly_df["bess_revenue_eur_per_mwh"].to_numpy(dtype=float)
-
-            # PV-only reference in EUR/MWh
             pv_only_vals_mwh = (
                 monthly_df["pv_only_revenue"].to_numpy(dtype=float)
                 / monthly_df["pv_only_direct_mwh"].clip(lower=1e-12).to_numpy(dtype=float)
             )
 
-            # Side-by-side bars
             ax5.bar(
                 x - width / 2,
                 pv_vals_mwh,
@@ -2034,7 +2095,6 @@ def app():
                 label="BESS"
             )
 
-            # PV-only reference curve with monthly markers
             ax5.plot(
                 x,
                 pv_only_vals_mwh,
@@ -2074,8 +2134,8 @@ def app():
                 ax6.tick_params(axis="x", rotation=45)
 
                 ax6b = ax6.twinx()
-                ax6b.plot(qh_plot["datetime"], qh_plot["afrr_charge_price_eur_per_mwh"], linestyle="--", alpha=0.7, label="Prix charge aFRR")
-                ax6b.plot(qh_plot["datetime"], qh_plot["afrr_discharge_price_eur_per_mwh"], linestyle="-.", alpha=0.7, label="Prix décharge aFRR")
+                ax6b.plot(qh_plot["datetime"], qh_plot["afrr_charge_price_effective_eur_per_mwh"], linestyle="--", alpha=0.7, label="Prix charge aFRR effectif")
+                ax6b.plot(qh_plot["datetime"], qh_plot["afrr_discharge_price_effective_eur_per_mwh"], linestyle="-.", alpha=0.7, label="Prix décharge aFRR effectif")
                 ax6b.set_ylabel("EUR/MWh")
 
                 lines_a, labels_a = ax6.get_legend_handles_labels()
@@ -2091,14 +2151,14 @@ def app():
 
         with c7:
             st.subheader("Comparaison Revenu PV-only vs Hybrid")
-        
+
             fig_cmp, ax_cmp = plt.subplots(figsize=(9, 4.8))
-        
+
             x = np.arange(len(monthly_df))
-        
+
             pv_only_monthly_keur = monthly_df["pv_only_revenue"].to_numpy(dtype=float) / 1000.0
             hybrid_monthly_keur = monthly_df["net_revenue"].to_numpy(dtype=float) / 1000.0
-        
+
             ax_cmp.plot(
                 x,
                 pv_only_monthly_keur,
@@ -2106,7 +2166,7 @@ def app():
                 linewidth=2.0,
                 label="PV-only"
             )
-        
+
             ax_cmp.plot(
                 x,
                 hybrid_monthly_keur,
@@ -2114,14 +2174,14 @@ def app():
                 linewidth=2.0,
                 label="Hybrid (PV + BESS + aFRR)"
             )
-        
+
             ax_cmp.set_title("Comparaison Revenu PV-only vs Hybrid")
             ax_cmp.set_ylabel("kEUR")
             ax_cmp.set_xlabel("Mois")
             ax_cmp.set_xticks(x)
             ax_cmp.set_xticklabels(monthly_df["month"], rotation=45)
             ax_cmp.legend()
-        
+
             st.pyplot(fig_cmp)
             plt.close(fig_cmp)
 
