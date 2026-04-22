@@ -312,17 +312,26 @@ def build_pv_generation_mwh(
     return hourly_net_mwh, stats
 
 
-def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
-    """
-    Wholesale DP:
-    - charge grid only if charge price is within the daily low quantile
-    - discharge only if:
-        1) sell price >= daily discharge quantile threshold
-        2) sell price >= required discharge price estimate
-           where required discharge price ~= avg stored charge price + minimum spread
+def build_pure_pv_benchmark(
+    pv_generation_mwh: np.ndarray,
+    pv_price: np.ndarray,
+    grid_export_limit_mw: float,
+) -> Dict[str, np.ndarray]:
+    pv_generation_mwh = _validate_array_length(pv_generation_mwh, "Production PV benchmark")
+    pv_price = _validate_array_length(pv_price, "Prix PV benchmark")
 
-    Implemented as iterative approximation because stored cost basis is not part of DP state.
-    """
+    pv_only_direct_mwh = np.minimum(np.maximum(pv_generation_mwh, 0.0), float(grid_export_limit_mw))
+    pv_only_revenue_eur = pv_only_direct_mwh * pv_price
+    total_pv_only_revenue_eur = float(pv_only_revenue_eur.sum())
+
+    return {
+        "pv_only_direct_mwh": pv_only_direct_mwh,
+        "pv_only_revenue_eur": pv_only_revenue_eur,
+        "total_pv_only_revenue_eur": np.array([total_pv_only_revenue_eur]),
+    }
+
+
+def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
     pv = _validate_array_length(inputs.solar_profile, "La production PV nette horaire")
     pv = np.maximum(pv, 0.0)
     pv_price = _validate_array_length(inputs.pv_price, "Le prix PV")
@@ -403,8 +412,6 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
             batt_sell_t = batt_sell[t]
             grid_buy_t = grid_buy[t]
 
-            pv_base_revenue = pv_t * pv_price_t
-
             for i in range(soc_steps):
                 best_val = neg_inf
                 best_j = -1
@@ -433,7 +440,6 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
 
                     elif delta_soc < -1e-12:
                         discharge_candidate = (-delta_soc) * inputs.eta_discharge
-                        pv_direct_candidate = pv_t
 
                         if discharge_candidate > 1e-9:
                             if batt_sell_t < discharge_threshold_series[t]:
@@ -517,7 +523,6 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
 
             elif delta_soc < -1e-12:
                 discharge[t] = (-delta_soc) * inputs.eta_discharge
-                pv_direct_candidate = pv[t]
 
             if delta_soc > 1e-12:
                 charge_cost_eur = pv_to_batt[t] * pv_price[t] + grid_charge[t] * grid_buy[t]
@@ -1119,6 +1124,7 @@ def build_final_result_after_market_arbitration(
 def build_summary_table(
     result: Dict[str, np.ndarray],
     pv_stats: Dict[str, float],
+    pure_pv_benchmark: Dict[str, np.ndarray],
     pv_dc_mw: float,
     batt_power_mw: float,
 ) -> pd.DataFrame:
@@ -1138,6 +1144,9 @@ def build_summary_table(
     bess_revenue_total = bess_revenue_base + afrr_net_revenue
     total_revenue = float(result["total_revenue_including_afrr_eur"][0]) if "total_revenue_including_afrr_eur" in result else float(result["total_revenue"][0])
 
+    pure_pv_revenue = float(pure_pv_benchmark["total_pv_only_revenue_eur"][0])
+    hybrid_added_value = total_revenue - pure_pv_revenue
+
     pv_rev_keur_per_mw = pv_revenue / max(pv_dc_mw, 1e-12) / 1000.0
     bess_rev_keur_per_mw = bess_revenue_total / max(batt_power_mw, 1e-12) / 1000.0
 
@@ -1155,6 +1164,8 @@ def build_summary_table(
 
     rows = [
         ("Revenu total", total_revenue, "EUR"),
+        ("Revenu Projet PV-only Project", pure_pv_revenue, "EUR"),
+        ("Valeur ajoutée de l'hybridation vs PV-only", hybrid_added_value, "EUR"),
         ("Revenu PV direct", pv_revenue, "EUR"),
         ("Revenu batterie wholesale", float(result["total_batt_sale_revenue"][0]), "EUR"),
         ("Coût charge réseau wholesale", float(result["total_grid_charge_cost"][0]), "EUR"),
@@ -1179,7 +1190,12 @@ def build_summary_table(
     return pd.DataFrame(rows, columns=["Indicateur", "Valeur", "Unité"])
 
 
-def monthly_dataframe(result: Dict[str, np.ndarray], pv_dc_mw: float, batt_power_mw: float) -> pd.DataFrame:
+def monthly_dataframe(
+    result: Dict[str, np.ndarray],
+    pure_pv_benchmark: Dict[str, np.ndarray],
+    pv_dc_mw: float,
+    batt_power_mw: float,
+) -> pd.DataFrame:
     idx = pd.date_range(f"{DEFAULT_YEAR}-01-01 00:00:00", periods=HOURS_PER_YEAR, freq="h")
 
     df = pd.DataFrame({
@@ -1191,6 +1207,8 @@ def monthly_dataframe(result: Dict[str, np.ndarray], pv_dc_mw: float, batt_power
         "shifted_mwh": result["discharge"],
         "grid_charge_mwh": result["grid_charge"],
         "pv_to_batt_mwh": result["pv_to_batt"],
+        "pv_only_direct_mwh": pure_pv_benchmark["pv_only_direct_mwh"],
+        "pv_only_revenue": pure_pv_benchmark["pv_only_revenue_eur"],
         "afrr_charge_mwh": result["afrr_charge_hourly_mwh"] if "afrr_charge_hourly_mwh" in result else np.zeros(HOURS_PER_YEAR),
         "afrr_discharge_mwh": result["afrr_discharge_hourly_mwh"] if "afrr_discharge_hourly_mwh" in result else np.zeros(HOURS_PER_YEAR),
         "afrr_charge_cost": result["afrr_charge_cost_hourly_eur"] if "afrr_charge_cost_hourly_eur" in result else np.zeros(HOURS_PER_YEAR),
@@ -1263,6 +1281,7 @@ def app():
               1. le prix est dans le quantile haut journalier
               2. le prix dépasse le coût moyen stocké + le spread minimum
             - En cas de conflit de décharge wholesale / aFRR, un arbitrage quart-horaire choisit le marché au prix de décharge le plus élevé.
+            - Un benchmark **PV-only Project** est aussi calculé pour comparer la valeur ajoutée de l'hybridation.
             """
         )
 
@@ -1475,6 +1494,12 @@ def app():
             else _read_single_column_csv(pv_price_upload)
         )
 
+        pure_pv_benchmark = build_pure_pv_benchmark(
+            pv_generation_mwh=pv_hourly_mwh,
+            pv_price=pv_price_curve,
+            grid_export_limit_mw=grid_export_limit_mw,
+        )
+
         batt_sell_curve = (
             _make_flat_curve(batt_sell_value)
             if batt_sell_mode == "Prix moyen annuel"
@@ -1601,14 +1626,16 @@ def app():
             })
             combined_soc_hourly_end = combined_soc_result["combined_soc_hourly_end"]
 
-        summary_df = build_summary_table(final_result, pv_stats, pv_dc_mw, batt_power_mw)
-        monthly_df = monthly_dataframe(final_result, pv_dc_mw, batt_power_mw)
+        summary_df = build_summary_table(final_result, pv_stats, pure_pv_benchmark, pv_dc_mw, batt_power_mw)
+        monthly_df = monthly_dataframe(final_result, pure_pv_benchmark, pv_dc_mw, batt_power_mw)
 
         idx = pd.date_range(f"{DEFAULT_YEAR}-01-01 00:00:00", periods=HOURS_PER_YEAR, freq="h")
         hourly_df = pd.DataFrame({
             "datetime": idx,
             "pv_generation_mwh": pv_hourly_mwh,
             "pv_price_eur_per_mwh": pv_price_curve,
+            "pv_only_direct_mwh": pure_pv_benchmark["pv_only_direct_mwh"],
+            "pv_only_revenue_eur": pure_pv_benchmark["pv_only_revenue_eur"],
             "battery_sell_price_eur_per_mwh": batt_sell_curve,
             "grid_buy_price_eur_per_mwh": grid_buy_curve,
             "pv_direct_mwh": final_result["pv_direct"],
@@ -1836,8 +1863,9 @@ def app():
                 -float(final_result["total_grid_charge_cost"][0]),
                 float(final_result["nightly_revenue_total"][0]),
                 float(final_result["total_afrr_net_revenue_eur"][0]) if "total_afrr_net_revenue_eur" in final_result else 0.0,
+                float(pure_pv_benchmark["total_pv_only_revenue_eur"][0]),
             ]
-            labels = ["PV direct", "Vente batterie", "Coût charge réseau", "SS nuit", "aFRR net"]
+            labels = ["PV direct", "Vente batterie", "Coût charge réseau", "SS nuit", "aFRR net", "PV-only"]
             ax1.bar(labels, bars)
             ax1.set_title("Décomposition des revenus")
             ax1.set_ylabel("EUR")
@@ -1873,6 +1901,7 @@ def app():
             fig3, ax3 = plt.subplots(figsize=(8, 4.5))
             ax3.plot(monthly_df["month"], monthly_df["pv_direct_mwh"], label="PV direct")
             ax3.plot(monthly_df["month"], monthly_df["shifted_mwh"], label="Énergie shiftée wholesale")
+            ax3.plot(monthly_df["month"], monthly_df["pv_only_direct_mwh"], label="PV-only direct")
             if "afrr_discharge_mwh" in monthly_df.columns:
                 ax3.plot(monthly_df["month"], monthly_df["afrr_discharge_mwh"], label="Décharge aFRR")
             ax3.set_title("Énergies valorisées par mois")
@@ -2028,6 +2057,40 @@ def app():
                 plt.close(fig6)
             else:
                 st.info("Activez l'aFRR et uploadez les deux fichiers quart-horaires pour afficher le graphique aFRR.")
+
+        st.subheader("Projet PV-only Project - 3 premiers jours de juin")
+        pv_only_start = pd.Timestamp(f"{DEFAULT_YEAR}-06-01 00:00:00")
+        pv_only_end = pv_only_start + pd.Timedelta(days=3)
+
+        df_pv_only = hourly_df[
+            (hourly_df["datetime"] >= pv_only_start) &
+            (hourly_df["datetime"] < pv_only_end)
+        ].copy()
+
+        fig_pv_only, ax_pv_only = plt.subplots(figsize=(12, 4.8))
+        ax_pv_only.fill_between(
+            df_pv_only["datetime"],
+            df_pv_only["pv_only_direct_mwh"],
+            color="orange",
+            alpha=0.5,
+            label="PV-only → Réseau"
+        )
+        ax_pv_only.plot(
+            df_pv_only["datetime"],
+            df_pv_only["pv_only_direct_mwh"],
+            color="orange",
+            linewidth=1.8
+        )
+        ax_pv_only.set_ylabel("Énergie (MWh)")
+        ax_pv_only.set_xlabel("Heure")
+        ax_pv_only.set_title("Projet PV-only Project - 3 premiers jours de juin")
+        ax_pv_only.xaxis.set_major_locator(mdates.HourLocator(interval=6))
+        ax_pv_only.xaxis.set_major_formatter(mdates.DateFormatter("%d %Hh"))
+        ax_pv_only.tick_params(axis="x", rotation=45)
+        ax_pv_only.legend()
+
+        st.pyplot(fig_pv_only)
+        plt.close(fig_pv_only)
 
         st.subheader("Table mensuelle")
         st.dataframe(monthly_df, use_container_width=True, hide_index=True)
