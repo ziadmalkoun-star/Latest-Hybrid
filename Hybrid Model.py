@@ -522,17 +522,17 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
                     max(inputs.batt_energy_mwh - soc_i, 0.0) / max(inputs.eta_charge, 1e-12),
                 )
                 forced_recoverable_soc_mwh = forced_recoverable_input_mwh * inputs.eta_charge
-                soc_after_forced = min(soc_i + forced_recoverable_soc_mwh, inputs.batt_energy_mwh)
-            
-                # After forced curtailed-PV recovery, optimize remaining decision
-                for j in range(soc_steps):
+                
+                min_next_soc = min(soc_i + forced_recoverable_soc_mwh, inputs.batt_energy_mwh)
+
+                for j in transitions[i]:   # IMPORTANT: respect power limits
                     soc_j = soc_grid[j]
-            
-                    # Do not allow the DP to undo the forced charge in the same hour
-                    if soc_j < soc_after_forced - 1e-12:
+                
+                    # enforce forced charging as a floor
+                    if soc_j + 1e-12 < min_next_soc:
                         continue
-            
-                    delta_soc = soc_j - soc_after_forced
+                
+                    delta_soc_after_forced = soc_j - min_next_soc
 
                     pv_direct_candidate = pv_sellable_t
                     sellable_pv_to_batt = 0.0
@@ -634,9 +634,14 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
                 max(inputs.batt_energy_mwh - soc_grid[state], 0.0) / max(inputs.eta_charge, 1e-12),
             )
             forced_recoverable_soc_mwh = forced_recoverable_input_mwh * inputs.eta_charge
-            soc_after_forced = min(soc_grid[state] + forced_recoverable_soc_mwh, inputs.batt_energy_mwh)
+            min_next_soc = min(soc_before + forced_recoverable_soc_mwh, inputs.batt_energy_mwh)
+
+            soc_target = soc_grid[next_state]
             
-            delta_soc = soc_grid[next_state] - soc_after_forced
+            if soc_target + 1e-12 < min_next_soc:
+                raise RuntimeError("Invalid policy: below forced SOC")
+            
+            delta_soc = soc_target - min_next_soc
             soc[t + 1] = soc_grid[next_state]
             
             pv_direct_candidate = pv_sellable_t
