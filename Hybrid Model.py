@@ -86,6 +86,63 @@ def _validate_array_length(arr: np.ndarray, name: str, expected_len: int = HOURS
         raise ValueError(f"{name} contient des valeurs non numériques ou infinies.")
     return arr
 
+def build_combined_soc_with_afrr(
+    result_hourly: Dict[str, np.ndarray],
+    afrr_result: Dict[str, np.ndarray] | None,
+    batt_energy_mwh: float,
+    initial_soc_mwh: float,
+    eta_charge: float,
+    eta_discharge: float,
+) -> Dict[str, np.ndarray]:
+
+    wholesale_pv_to_batt_h = np.asarray(result_hourly["pv_to_batt"], dtype=float)
+    wholesale_grid_charge_h = np.asarray(result_hourly["grid_charge"], dtype=float)
+    wholesale_discharge_h = np.asarray(result_hourly["discharge"], dtype=float)
+
+    # Convert hourly → quarter-hour
+    wholesale_pv_to_batt_qh = np.repeat(wholesale_pv_to_batt_h / 4.0, 4)
+    wholesale_grid_charge_qh = np.repeat(wholesale_grid_charge_h / 4.0, 4)
+    wholesale_discharge_market_qh = np.repeat(wholesale_discharge_h / 4.0, 4)
+
+    if afrr_result is not None:
+        afrr_charge_market_qh = np.asarray(afrr_result["afrr_charge_qh_mwh"], dtype=float)
+        afrr_discharge_market_qh = np.asarray(afrr_result["afrr_discharge_qh_mwh"], dtype=float)
+    else:
+        afrr_charge_market_qh = np.zeros(QH_PER_YEAR, dtype=float)
+        afrr_discharge_market_qh = np.zeros(QH_PER_YEAR, dtype=float)
+
+    # Convert to SOC flows
+    wholesale_charge_to_soc_qh = (wholesale_pv_to_batt_qh + wholesale_grid_charge_qh) * eta_charge
+    wholesale_discharge_from_soc_qh = wholesale_discharge_market_qh / max(eta_discharge, 1e-12)
+
+    afrr_charge_to_soc_qh = afrr_charge_market_qh * eta_charge
+    afrr_discharge_from_soc_qh = afrr_discharge_market_qh / max(eta_discharge, 1e-12)
+
+    combined_charge_to_soc_qh = wholesale_charge_to_soc_qh + afrr_charge_to_soc_qh
+    combined_discharge_from_soc_qh = wholesale_discharge_from_soc_qh + afrr_discharge_from_soc_qh
+
+    # SOC simulation
+    soc_qh = np.zeros(QH_PER_YEAR + 1, dtype=float)
+    soc_qh[0] = float(initial_soc_mwh)
+
+    for t in range(QH_PER_YEAR):
+        soc_next = soc_qh[t] + combined_charge_to_soc_qh[t] - combined_discharge_from_soc_qh[t]
+        soc_qh[t + 1] = min(max(soc_next, 0.0), batt_energy_mwh)
+
+    soc_hourly_end = soc_qh[4::4]
+
+    return {
+        "combined_soc_qh": soc_qh,
+        "combined_soc_hourly_end": soc_hourly_end,
+        "combined_charge_to_soc_qh": combined_charge_to_soc_qh,
+        "combined_discharge_from_soc_qh": combined_discharge_from_soc_qh,
+        "wholesale_charge_to_soc_qh": wholesale_charge_to_soc_qh,
+        "wholesale_discharge_from_soc_qh": wholesale_discharge_from_soc_qh,
+        "afrr_charge_to_soc_qh": afrr_charge_to_soc_qh,
+        "afrr_discharge_from_soc_qh": afrr_discharge_from_soc_qh,
+        "afrr_charge_market_qh": afrr_charge_market_qh,
+        "afrr_discharge_market_qh": afrr_discharge_market_qh,
+    }
 
 def _read_single_column_csv(uploaded_file, expected_len: int = HOURS_PER_YEAR) -> np.ndarray:
     if uploaded_file is None:
