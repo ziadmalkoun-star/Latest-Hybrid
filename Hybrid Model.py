@@ -12,7 +12,7 @@ HOURS_PER_YEAR = 8760
 QH_PER_HOUR = 4
 QH_PER_YEAR = HOURS_PER_YEAR * QH_PER_HOUR
 QH_DT_HOURS = 0.25
-DEFAULT_YEAR = 2025  # année non bissextile
+DEFAULT_YEAR = 2025
 PV_ZERO_TOLERANCE_MWH = 1e-6
 
 
@@ -32,23 +32,28 @@ class SimulationInputs:
     batt_sell_price: np.ndarray
     grid_buy_price: np.ndarray
 
-    solar_profile: np.ndarray  # production PV nette horaire en MWh
-    nightly_bess_revenue_eur: float
-    soc_steps: int
-    initial_soc_mwh: float
-    final_soc_mwh: float
-    grid_export_limit_mw: float
-    cycle_cost_eur_per_mwh: float
-    charge_quantile: float
-    discharge_quantile: float
-    max_cycles_per_day: float
-    min_spread_arbitrage_eur_per_mwh: float
+    # PV available for direct sale / standard PV-to-battery charging
+    solar_profile: np.ndarray
+
+    # PV curtailed but optionally recoverable into battery only
+    curtailed_pv_recoverable_mwh: np.ndarray | None = None
+
+    nightly_bess_revenue_eur: float = 0.0
+    soc_steps: int = 101
+    initial_soc_mwh: float = 0.0
+    final_soc_mwh: float = 0.0
+    grid_export_limit_mw: float = 0.0
+    cycle_cost_eur_per_mwh: float = 0.0
+    charge_quantile: float = 20.0
+    discharge_quantile: float = 80.0
+    max_cycles_per_day: float = 1.0
+    min_spread_arbitrage_eur_per_mwh: float = 0.0
 
     # Capture rates
     pv_capture_rate_pct: float = 100.0
     bess_capture_rate_pct: float = 100.0
 
-    # aFRR inputs (effective prices used by economics)
+    # aFRR inputs
     enable_afrr: bool = False
     afrr_charge_price_qh: np.ndarray | None = None
     afrr_discharge_price_qh: np.ndarray | None = None
@@ -60,6 +65,18 @@ class SimulationInputs:
     afrr_pv_zero_tolerance_mwh: float = PV_ZERO_TOLERANCE_MWH
     afrr_n_qh_per_side: int = 4
 
+    # Curtailment
+    enable_tso_dso_curtailment: bool = False
+    tso_dso_monthly_curtailment_pct: np.ndarray | None = None
+    enable_self_curtailment: bool = False
+    curtailment_threshold_eur_per_mwh: float = -1.0
+    pv_commercial_structure: str = "Fully merchant"  # Fully merchant / With CfD / With PPA
+    cfd_price_eur_per_mwh: float = 0.0
+    negative_price_rule: bool = False
+    consecutive_negative_hours_limit: int = 6
+    ppa_price_eur_per_mwh: float = 0.0
+    charge_battery_if_curtailment: bool = False
+
 
 def _validate_array_length(arr: np.ndarray, name: str, expected_len: int = HOURS_PER_YEAR) -> np.ndarray:
     arr = np.asarray(arr, dtype=float).reshape(-1)
@@ -68,61 +85,6 @@ def _validate_array_length(arr: np.ndarray, name: str, expected_len: int = HOURS
     if np.any(~np.isfinite(arr)):
         raise ValueError(f"{name} contient des valeurs non numériques ou infinies.")
     return arr
-
-
-def build_combined_soc_with_afrr(
-    result_hourly: Dict[str, np.ndarray],
-    afrr_result: Dict[str, np.ndarray] | None,
-    batt_energy_mwh: float,
-    initial_soc_mwh: float,
-    eta_charge: float,
-    eta_discharge: float,
-) -> Dict[str, np.ndarray]:
-    wholesale_pv_to_batt_h = np.asarray(result_hourly["pv_to_batt"], dtype=float)
-    wholesale_grid_charge_h = np.asarray(result_hourly["grid_charge"], dtype=float)
-    wholesale_discharge_h = np.asarray(result_hourly["discharge"], dtype=float)
-
-    wholesale_pv_to_batt_qh = np.repeat(wholesale_pv_to_batt_h / QH_PER_HOUR, QH_PER_HOUR)
-    wholesale_grid_charge_qh = np.repeat(wholesale_grid_charge_h / QH_PER_HOUR, QH_PER_HOUR)
-    wholesale_discharge_market_qh = np.repeat(wholesale_discharge_h / QH_PER_HOUR, QH_PER_HOUR)
-
-    if afrr_result is not None:
-        afrr_charge_market_qh = np.asarray(afrr_result["afrr_charge_qh_mwh"], dtype=float)
-        afrr_discharge_market_qh = np.asarray(afrr_result["afrr_discharge_qh_mwh"], dtype=float)
-    else:
-        afrr_charge_market_qh = np.zeros(QH_PER_YEAR, dtype=float)
-        afrr_discharge_market_qh = np.zeros(QH_PER_YEAR, dtype=float)
-
-    wholesale_charge_to_soc_qh = (wholesale_pv_to_batt_qh + wholesale_grid_charge_qh) * eta_charge
-    wholesale_discharge_from_soc_qh = wholesale_discharge_market_qh / max(eta_discharge, 1e-12)
-
-    afrr_charge_to_soc_qh = afrr_charge_market_qh * eta_charge
-    afrr_discharge_from_soc_qh = afrr_discharge_market_qh / max(eta_discharge, 1e-12)
-
-    combined_charge_to_soc_qh = wholesale_charge_to_soc_qh + afrr_charge_to_soc_qh
-    combined_discharge_from_soc_qh = wholesale_discharge_from_soc_qh + afrr_discharge_from_soc_qh
-
-    soc_qh = np.zeros(QH_PER_YEAR + 1, dtype=float)
-    soc_qh[0] = float(initial_soc_mwh)
-
-    for t in range(QH_PER_YEAR):
-        soc_next = soc_qh[t] + combined_charge_to_soc_qh[t] - combined_discharge_from_soc_qh[t]
-        soc_qh[t + 1] = min(max(soc_next, 0.0), batt_energy_mwh)
-
-    soc_hourly_end = soc_qh[QH_PER_HOUR::QH_PER_HOUR]
-
-    return {
-        "combined_soc_qh": soc_qh,
-        "combined_soc_hourly_end": soc_hourly_end,
-        "combined_charge_to_soc_qh": combined_charge_to_soc_qh,
-        "combined_discharge_from_soc_qh": combined_discharge_from_soc_qh,
-        "wholesale_charge_to_soc_qh": wholesale_charge_to_soc_qh,
-        "wholesale_discharge_from_soc_qh": wholesale_discharge_from_soc_qh,
-        "afrr_charge_to_soc_qh": afrr_charge_to_soc_qh,
-        "afrr_discharge_from_soc_qh": afrr_discharge_from_soc_qh,
-        "afrr_charge_market_qh": afrr_charge_market_qh,
-        "afrr_discharge_market_qh": afrr_discharge_market_qh,
-    }
 
 
 def _read_single_column_csv(uploaded_file, expected_len: int = HOURS_PER_YEAR) -> np.ndarray:
@@ -141,7 +103,6 @@ def _read_single_column_csv(uploaded_file, expected_len: int = HOURS_PER_YEAR) -
         text = str(raw)
 
     lines = [line.strip() for line in text.splitlines() if line.strip()]
-
     if not lines:
         raise ValueError("Le CSV est vide.")
 
@@ -171,64 +132,31 @@ def _read_single_column_csv(uploaded_file, expected_len: int = HOURS_PER_YEAR) -
         )
 
     arr = np.asarray(values, dtype=float)
-
     if np.any(~np.isfinite(arr)):
         raise ValueError("Le CSV contient des valeurs non finies.")
-
     return arr
 
 
 def _read_single_column_csv_qh(uploaded_file, expected_len: int = QH_PER_YEAR) -> np.ndarray:
+    return _read_single_column_csv(uploaded_file, expected_len=expected_len)
+
+
+def read_monthly_curtailment_excel(uploaded_file) -> np.ndarray:
     if uploaded_file is None:
-        raise ValueError("Aucun fichier CSV quart-horaire fourni.")
+        raise ValueError("Aucun fichier Excel de courbe de curtailment fourni.")
 
     try:
         uploaded_file.seek(0)
     except Exception:
         pass
 
-    raw = uploaded_file.read()
-    if isinstance(raw, bytes):
-        text = raw.decode("utf-8-sig", errors="replace")
-    else:
-        text = str(raw)
+    df = pd.read_excel(uploaded_file, header=None)
+    values = pd.to_numeric(df.iloc[:, 0], errors="coerce").dropna().to_numpy(dtype=float)
 
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(values) != 12:
+        raise ValueError(f"La courbe de curtailment mensuelle doit contenir exactement 12 valeurs. Reçu: {len(values)}.")
 
-    if not lines:
-        raise ValueError("Le CSV quart-horaire est vide.")
-
-    values = []
-    bad_rows = []
-
-    for i, line in enumerate(lines):
-        cleaned = line.strip().strip('"').strip("'").replace(",", ".")
-        try:
-            values.append(float(cleaned))
-        except ValueError:
-            bad_rows.append(i)
-
-    if len(bad_rows) == 1 and bad_rows[0] == 0 and len(values) == expected_len:
-        return np.asarray(values, dtype=float)
-
-    if bad_rows:
-        raise ValueError(
-            f"Le CSV quart-horaire contient des valeurs non numériques dans la première colonne. "
-            f"Lignes problématiques: {bad_rows[:10]}"
-        )
-
-    if len(values) != expected_len:
-        raise ValueError(
-            f"Le CSV quart-horaire doit contenir exactement {expected_len} lignes numériques. "
-            f"Reçu: {len(values)}."
-        )
-
-    arr = np.asarray(values, dtype=float)
-
-    if np.any(~np.isfinite(arr)):
-        raise ValueError("Le CSV quart-horaire contient des valeurs non finies.")
-
-    return arr
+    return values
 
 
 def _make_flat_curve(value: float, expected_len: int = HOURS_PER_YEAR) -> np.ndarray:
@@ -238,11 +166,7 @@ def _make_flat_curve(value: float, expected_len: int = HOURS_PER_YEAR) -> np.nda
 
 
 def build_quarter_hour_index(year: int = DEFAULT_YEAR) -> pd.DatetimeIndex:
-    return pd.date_range(
-        f"{year}-01-01 00:00:00",
-        periods=QH_PER_YEAR,
-        freq="15min"
-    )
+    return pd.date_range(f"{year}-01-01 00:00:00", periods=QH_PER_YEAR, freq="15min")
 
 
 def repeat_hourly_to_qh(hourly_arr: np.ndarray) -> np.ndarray:
@@ -252,19 +176,13 @@ def repeat_hourly_to_qh(hourly_arr: np.ndarray) -> np.ndarray:
     return np.repeat(hourly_arr, QH_PER_HOUR)
 
 
-def build_night_mask_qh(
-    idx_qh: pd.DatetimeIndex,
-    night_start_hour: int,
-    night_end_hour: int,
-) -> np.ndarray:
+def build_night_mask_qh(idx_qh: pd.DatetimeIndex, night_start_hour: int, night_end_hour: int) -> np.ndarray:
     hours = idx_qh.hour.to_numpy()
 
     if night_start_hour == night_end_hour:
         return np.ones(len(idx_qh), dtype=bool)
-
     if night_start_hour > night_end_hour:
         return (hours >= night_start_hour) | (hours < night_end_hour)
-
     return (hours >= night_start_hour) & (hours < night_end_hour)
 
 
@@ -277,10 +195,12 @@ def build_standard_france_solar_profile() -> np.ndarray:
     sunrise = 12.0 - daylight_hours / 2.0
     sunset = 12.0 + daylight_hours / 2.0
     shape = np.zeros(HOURS_PER_YEAR, dtype=float)
+
     for i in range(HOURS_PER_YEAR):
         if sunrise[i] <= hour[i] <= sunset[i]:
             x = (hour[i] - sunrise[i]) / max(sunset[i] - sunrise[i], 1e-9)
             shape[i] = (np.sin(np.pi * x) ** 1.6) * seasonal[i]
+
     total = shape.sum()
     if total <= 0:
         raise ValueError("Impossible de générer une courbe solaire standard valide.")
@@ -296,6 +216,7 @@ def build_pv_generation_mwh(
 ) -> Tuple[np.ndarray, Dict[str, float]]:
     relative = _validate_array_length(solar_profile_relative, "Le profil solaire")
     relative = np.maximum(relative, 0.0)
+
     if relative.sum() <= 0:
         raise ValueError("Le profil solaire doit avoir une somme strictement positive.")
     if pv_dc_mw < 0 or productible_kwh_per_kwp < 0:
@@ -319,6 +240,111 @@ def build_pv_generation_mwh(
     return hourly_net_mwh, stats
 
 
+def apply_tso_dso_curtailment(
+    pv_hourly_mwh: np.ndarray,
+    monthly_curtailment_pct: np.ndarray,
+) -> Dict[str, np.ndarray]:
+    pv_hourly_mwh = _validate_array_length(pv_hourly_mwh, "PV horaire avant TSO/DSO")
+    monthly_curtailment_pct = np.asarray(monthly_curtailment_pct, dtype=float).reshape(-1)
+
+    if len(monthly_curtailment_pct) != 12:
+        raise ValueError("La courbe mensuelle de curtailment TSO/DSO doit avoir 12 valeurs.")
+
+    idx = pd.date_range(f"{DEFAULT_YEAR}-01-01 00:00:00", periods=HOURS_PER_YEAR, freq="h")
+    month_idx = idx.month.to_numpy() - 1
+    pct_hourly = monthly_curtailment_pct[month_idx]
+
+    pv_after = pv_hourly_mwh * (1.0 - pct_hourly)
+    pv_after = np.maximum(pv_after, 0.0)
+    curtailed = np.maximum(pv_hourly_mwh - pv_after, 0.0)
+    flag = curtailed > 1e-12
+
+    return {
+        "pv_after_tso_dso_mwh": pv_after,
+        "tso_dso_curtailed_mwh": curtailed,
+        "tso_dso_curtailment_flag": flag.astype(int),
+        "tso_dso_monthly_pct_hourly": pct_hourly,
+    }
+
+
+def apply_self_curtailment(
+    pv_hourly_mwh: np.ndarray,
+    pv_spot_price_raw: np.ndarray,
+    pv_spot_price_effective: np.ndarray,
+    enable_self_curtailment: bool,
+    pv_commercial_structure: str,
+    curtailment_threshold_eur_per_mwh: float,
+    cfd_price_eur_per_mwh: float,
+    negative_price_rule: bool,
+    consecutive_negative_hours_limit: int,
+    ppa_price_eur_per_mwh: float,
+) -> Dict[str, np.ndarray]:
+    pv_hourly_mwh = _validate_array_length(pv_hourly_mwh, "PV avant self curtailment")
+    pv_spot_price_raw = _validate_array_length(pv_spot_price_raw, "Prix spot PV raw")
+    pv_spot_price_effective = _validate_array_length(pv_spot_price_effective, "Prix spot PV effectif")
+
+    sellable = pv_hourly_mwh.copy()
+    pv_effective_price = pv_spot_price_effective.copy()
+    self_curtailed = np.zeros(HOURS_PER_YEAR, dtype=float)
+    self_flag = np.zeros(HOURS_PER_YEAR, dtype=int)
+    structure_arr = np.full(HOURS_PER_YEAR, pv_commercial_structure, dtype=object)
+    reason_arr = np.full(HOURS_PER_YEAR, "", dtype=object)
+
+    if not enable_self_curtailment:
+        return {
+            "pv_after_self_curtailment_mwh": sellable,
+            "self_curtailed_mwh": self_curtailed,
+            "self_curtailment_flag": self_flag,
+            "pv_effective_price_eur_per_mwh": pv_effective_price,
+            "pv_commercial_structure_hourly": structure_arr,
+            "self_curtailment_reason": reason_arr,
+        }
+
+    if pv_commercial_structure == "Fully merchant":
+        mask = pv_spot_price_raw <= curtailment_threshold_eur_per_mwh
+        self_curtailed[mask] = sellable[mask]
+        sellable[mask] = 0.0
+        self_flag[mask] = 1
+        reason_arr[mask] = "Merchant threshold curtailment"
+        pv_effective_price = pv_spot_price_effective
+
+    elif pv_commercial_structure == "With CfD":
+        pv_effective_price[:] = float(cfd_price_eur_per_mwh)
+
+        if negative_price_rule:
+            neg_run = 0
+            for t in range(HOURS_PER_YEAR):
+                if pv_spot_price_raw[t] < 0:
+                    neg_run += 1
+                    if neg_run > int(consecutive_negative_hours_limit):
+                        self_curtailed[t] = sellable[t]
+                        sellable[t] = 0.0
+                        self_flag[t] = 1
+                        reason_arr[t] = "CfD negative-hours curtailment"
+                else:
+                    neg_run = 0
+
+    elif pv_commercial_structure == "With PPA":
+        pv_effective_price[:] = float(ppa_price_eur_per_mwh)
+        mask = pv_spot_price_raw <= curtailment_threshold_eur_per_mwh
+        self_curtailed[mask] = sellable[mask]
+        sellable[mask] = 0.0
+        self_flag[mask] = 1
+        reason_arr[mask] = "PPA threshold curtailment"
+
+    else:
+        raise ValueError(f"Structure commerciale PV non reconnue: {pv_commercial_structure}")
+
+    return {
+        "pv_after_self_curtailment_mwh": sellable,
+        "self_curtailed_mwh": self_curtailed,
+        "self_curtailment_flag": self_flag,
+        "pv_effective_price_eur_per_mwh": pv_effective_price,
+        "pv_commercial_structure_hourly": structure_arr,
+        "self_curtailment_reason": reason_arr,
+    }
+
+
 def build_pure_pv_benchmark(
     pv_generation_mwh: np.ndarray,
     pv_price: np.ndarray,
@@ -339,8 +365,15 @@ def build_pure_pv_benchmark(
 
 
 def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
-    pv = _validate_array_length(inputs.solar_profile, "La production PV nette horaire")
-    pv = np.maximum(pv, 0.0)
+    pv_sellable = _validate_array_length(inputs.solar_profile, "La production PV nette horaire sellable")
+    pv_sellable = np.maximum(pv_sellable, 0.0)
+
+    if inputs.curtailed_pv_recoverable_mwh is None:
+        pv_recoverable = np.zeros(HOURS_PER_YEAR, dtype=float)
+    else:
+        pv_recoverable = _validate_array_length(inputs.curtailed_pv_recoverable_mwh, "PV curtailed recoverable")
+        pv_recoverable = np.maximum(pv_recoverable, 0.0)
+
     pv_price = _validate_array_length(inputs.pv_price, "Le prix PV")
     batt_sell = _validate_array_length(inputs.batt_sell_price, "Le prix de vente batterie")
     grid_buy = _validate_array_length(inputs.grid_buy_price, "Le prix d'achat réseau")
@@ -362,7 +395,7 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
         lambda x: np.percentile(x, inputs.discharge_quantile)
     ).to_numpy()
 
-    if np.any(~np.isfinite(pv)) or np.any(~np.isfinite(pv_price)) or np.any(~np.isfinite(batt_sell)) or np.any(~np.isfinite(grid_buy)):
+    if np.any(~np.isfinite(pv_sellable)) or np.any(~np.isfinite(pv_price)) or np.any(~np.isfinite(batt_sell)) or np.any(~np.isfinite(grid_buy)):
         raise ValueError("Une ou plusieurs séries contiennent des valeurs invalides.")
     if inputs.batt_power_mw < 0 or inputs.batt_energy_mwh < 0:
         raise ValueError("La puissance et la capacité batterie doivent être positives.")
@@ -377,7 +410,7 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
     if inputs.final_soc_mwh > inputs.batt_energy_mwh:
         raise ValueError("Le SOC final ne peut pas dépasser la capacité batterie.")
 
-    T = len(pv)
+    T = len(pv_sellable)
     if T != HOURS_PER_YEAR:
         raise ValueError("Toutes les séries doivent contenir 8760 heures.")
 
@@ -414,7 +447,8 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
 
         for t in range(T - 1, -1, -1):
             value_now = np.full(soc_steps, neg_inf, dtype=float)
-            pv_t = pv[t]
+            pv_sellable_t = pv_sellable[t]
+            pv_recoverable_t = pv_recoverable[t]
             pv_price_t = pv_price[t]
             batt_sell_t = batt_sell[t]
             grid_buy_t = grid_buy[t]
@@ -427,22 +461,29 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
                 for j in transitions[i]:
                     delta_soc = soc_grid[j] - soc_i
 
-                    pv_direct_candidate = pv_t
-                    pv_to_batt = 0.0
+                    pv_direct_candidate = pv_sellable_t
+                    sellable_pv_to_batt = 0.0
+                    recoverable_pv_to_batt = 0.0
                     grid_charge = 0.0
                     discharge_candidate = 0.0
                     cycle_penalty = 0.0
 
                     if delta_soc > 1e-12:
                         charge_input = delta_soc / inputs.eta_charge
-                        pv_to_batt = min(charge_input, pv_t)
-                        grid_charge = max(charge_input - pv_to_batt, 0.0)
-                        pv_direct_candidate = pv_t - pv_to_batt
+
+                        recoverable_pv_to_batt = min(charge_input, pv_recoverable_t)
+                        remaining_after_recoverable = charge_input - recoverable_pv_to_batt
+
+                        sellable_pv_to_batt = min(remaining_after_recoverable, pv_sellable_t)
+                        remaining_after_sellable = remaining_after_recoverable - sellable_pv_to_batt
+
+                        grid_charge = max(remaining_after_sellable, 0.0)
+                        pv_direct_candidate = pv_sellable_t - sellable_pv_to_batt
 
                         if grid_charge > 1e-9 and grid_buy_t > charge_threshold_series[t]:
                             continue
 
-                        if pv_t < charge_input and (batt_sell_t - grid_buy_t) < inputs.min_spread_arbitrage_eur_per_mwh:
+                        if (recoverable_pv_to_batt + sellable_pv_to_batt) < charge_input and (batt_sell_t - grid_buy_t) < inputs.min_spread_arbitrage_eur_per_mwh:
                             continue
 
                     elif delta_soc < -1e-12:
@@ -458,7 +499,6 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
 
                     if total_export > inputs.grid_export_limit_mw:
                         excess = total_export - inputs.grid_export_limit_mw
-
                         reduction_pv = min(excess, pv_direct_candidate)
                         pv_direct_candidate -= reduction_pv
                         excess -= reduction_pv
@@ -497,6 +537,7 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
 
         pv_direct = np.zeros(T, dtype=float)
         pv_to_batt = np.zeros(T, dtype=float)
+        pv_curtailed_to_battery = np.zeros(T, dtype=float)
         grid_charge = np.zeros(T, dtype=float)
         discharge = np.zeros(T, dtype=float)
         batt_sale_revenue = np.zeros(T, dtype=float)
@@ -517,22 +558,39 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
             delta_soc = soc_grid[next_state] - soc_grid[state]
             soc[t + 1] = soc_grid[next_state]
 
-            pv_direct_candidate = pv[t]
-            pv_to_batt[t] = 0.0
+            pv_sellable_t = pv_sellable[t]
+            pv_recoverable_t = pv_recoverable[t]
+
+            pv_direct_candidate = pv_sellable_t
+            sellable_pv_to_batt = 0.0
+            recoverable_pv_to_batt = 0.0
             grid_charge[t] = 0.0
             discharge[t] = 0.0
 
             if delta_soc > 1e-12:
                 charge_input = delta_soc / inputs.eta_charge
-                pv_to_batt[t] = min(charge_input, pv[t])
-                grid_charge[t] = max(charge_input - pv_to_batt[t], 0.0)
-                pv_direct_candidate = pv[t] - pv_to_batt[t]
+
+                recoverable_pv_to_batt = min(charge_input, pv_recoverable_t)
+                remaining_after_recoverable = charge_input - recoverable_pv_to_batt
+
+                sellable_pv_to_batt = min(remaining_after_recoverable, pv_sellable_t)
+                remaining_after_sellable = remaining_after_recoverable - sellable_pv_to_batt
+
+                grid_charge[t] = max(remaining_after_sellable, 0.0)
+                pv_direct_candidate = pv_sellable_t - sellable_pv_to_batt
 
             elif delta_soc < -1e-12:
                 discharge[t] = (-delta_soc) * inputs.eta_discharge
 
+            pv_to_batt[t] = sellable_pv_to_batt
+            pv_curtailed_to_battery[t] = recoverable_pv_to_batt
+
             if delta_soc > 1e-12:
-                charge_cost_eur = pv_to_batt[t] * pv_price[t] + grid_charge[t] * grid_buy[t]
+                charge_cost_eur = (
+                    sellable_pv_to_batt * pv_price[t] +
+                    grid_charge[t] * grid_buy[t]
+                    # recoverable_pv_to_batt enters at zero opportunity cost
+                )
                 stored_energy_value_eur += charge_cost_eur
                 stored_energy_mwh += delta_soc
 
@@ -576,6 +634,7 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
             "soc": soc,
             "pv_direct": pv_direct,
             "pv_to_batt": pv_to_batt,
+            "pv_curtailed_to_battery": pv_curtailed_to_battery,
             "grid_charge": grid_charge,
             "discharge": discharge,
             "pv_direct_revenue": pv_direct_revenue,
@@ -692,7 +751,6 @@ def select_best_daily_afrr_trade_blocks(
 
         if len(selected_charge) < n_qh or len(selected_discharge) < n_qh:
             continue
-
         if selected_charge.max() >= selected_discharge.min():
             continue
 
@@ -742,16 +800,10 @@ def simulate_afrr_night_arbitrage(inputs: SimulationInputs, result_hourly: Dict[
     discharge_prices_qh = _validate_array_length(inputs.afrr_discharge_price_qh, "Prix aFRR décharge", QH_PER_YEAR)
 
     idx_qh = build_quarter_hour_index(DEFAULT_YEAR)
-
     pv_hourly = _validate_array_length(inputs.solar_profile, "Production PV nette horaire", HOURS_PER_YEAR)
     pv_qh = repeat_hourly_to_qh(pv_hourly / 4.0)
 
-    night_mask_qh = build_night_mask_qh(
-        idx_qh,
-        inputs.afrr_night_start_hour,
-        inputs.afrr_night_end_hour,
-    )
-
+    night_mask_qh = build_night_mask_qh(idx_qh, inputs.afrr_night_start_hour, inputs.afrr_night_end_hour)
     no_pv_mask_qh = pv_qh <= float(inputs.afrr_pv_zero_tolerance_mwh)
     eligible_mask_qh = night_mask_qh & no_pv_mask_qh
 
@@ -775,12 +827,7 @@ def simulate_afrr_night_arbitrage(inputs: SimulationInputs, result_hourly: Dict[
     })
     df["day"] = df["datetime"].dt.date
 
-    limits = _afrr_qh_limits(
-        batt_power_mw=inputs.batt_power_mw,
-        eta_charge=inputs.eta_charge,
-        eta_discharge=inputs.eta_discharge,
-        dt_hours=QH_DT_HOURS,
-    )
+    limits = _afrr_qh_limits(inputs.batt_power_mw, inputs.eta_charge, inputs.eta_discharge, QH_DT_HOURS)
 
     for day, group in df.groupby("day", sort=True):
         group_idx = group.index.to_numpy()
@@ -803,7 +850,6 @@ def simulate_afrr_night_arbitrage(inputs: SimulationInputs, result_hourly: Dict[
         )
 
         soc_day_start = soc_current
-
         day_charge_qh_mwh = np.zeros(len(group_idx), dtype=float)
         day_discharge_qh_mwh = np.zeros(len(group_idx), dtype=float)
         day_charge_cost_qh_eur = np.zeros(len(group_idx), dtype=float)
@@ -836,7 +882,6 @@ def simulate_afrr_night_arbitrage(inputs: SimulationInputs, result_hourly: Dict[
             for rel_idx in charge_rel_indices:
                 available_capacity_mwh = max(inputs.batt_energy_mwh - soc_working, 0.0)
                 stored_this_qh = min(limits["stored_per_qh_mwh"], available_capacity_mwh)
-
                 if stored_this_qh <= 1e-9:
                     continue
 
@@ -857,12 +902,7 @@ def simulate_afrr_night_arbitrage(inputs: SimulationInputs, result_hourly: Dict[
                 max_output_by_export = inputs.grid_export_limit_mw * QH_DT_HOURS
                 max_output_by_soc = soc_working * inputs.eta_discharge
 
-                discharge_this_qh = min(
-                    max_output_by_power,
-                    max_output_by_export,
-                    max_output_by_soc,
-                )
-
+                discharge_this_qh = min(max_output_by_power, max_output_by_export, max_output_by_soc)
                 if discharge_this_qh <= 1e-9:
                     continue
 
@@ -871,9 +911,7 @@ def simulate_afrr_night_arbitrage(inputs: SimulationInputs, result_hourly: Dict[
                 day_discharge_qh_mwh[rel_idx] = discharge_this_qh
                 day_sale_revenue_qh_eur[rel_idx] = discharge_this_qh * discharge_day[rel_idx]
                 day_cycle_cost_qh_eur[rel_idx] = soc_removed_this_qh * inputs.afrr_cycle_cost_eur_per_mwh
-                day_net_revenue_qh_eur[rel_idx] += (
-                    day_sale_revenue_qh_eur[rel_idx] - day_cycle_cost_qh_eur[rel_idx]
-                )
+                day_net_revenue_qh_eur[rel_idx] += day_sale_revenue_qh_eur[rel_idx] - day_cycle_cost_qh_eur[rel_idx]
 
                 discharged_mwh_total += discharge_this_qh
                 sale_revenue_eur_total += day_sale_revenue_qh_eur[rel_idx]
@@ -957,7 +995,6 @@ def reconcile_wholesale_afrr_dispatch_qh(
     corrected_wholesale_pv_to_batt_qh = wholesale_pv_to_batt_qh.copy()
     corrected_wholesale_grid_charge_qh = wholesale_grid_charge_qh.copy()
     corrected_wholesale_discharge_qh = wholesale_discharge_qh.copy()
-
     corrected_afrr_charge_qh = afrr_charge_qh.copy()
     corrected_afrr_discharge_qh = afrr_discharge_qh.copy()
 
@@ -1136,6 +1173,7 @@ def build_summary_table(
     batt_power_mw: float,
     pv_capture_rate_pct: float,
     bess_capture_rate_pct: float,
+    curtailment_outputs: Dict[str, np.ndarray],
 ) -> pd.DataFrame:
     pv_revenue = float(result["total_direct_pv_revenue"][0])
 
@@ -1162,14 +1200,17 @@ def build_summary_table(
     pv_sold_mwh = float(result["pv_direct_sold_mwh"][0])
     bess_sold_mwh = float(result["energy_shifted_mwh"][0])
 
-    afrr_discharged_mwh = 0.0
-    if "afrr_discharge_hourly_mwh" in result:
-        afrr_discharged_mwh = float(np.sum(result["afrr_discharge_hourly_mwh"]))
-
+    afrr_discharged_mwh = float(np.sum(result["afrr_discharge_hourly_mwh"])) if "afrr_discharge_hourly_mwh" in result else 0.0
     bess_total_discharged_mwh = bess_sold_mwh + afrr_discharged_mwh
 
     pv_rev_eur_per_mwh = pv_revenue / max(pv_sold_mwh, 1e-12)
     bess_rev_eur_per_mwh = bess_revenue_total / max(bess_total_discharged_mwh, 1e-12)
+
+    tso_dso_curtailed = float(np.sum(curtailment_outputs["tso_dso_curtailed_mwh"]))
+    self_curtailed = float(np.sum(curtailment_outputs["self_curtailed_mwh"]))
+    candidate_curtailed = float(np.sum(curtailment_outputs["pv_curtailment_candidate_mwh"]))
+    recovered_to_battery = float(np.sum(curtailment_outputs["pv_curtailed_to_battery_mwh_actual"]))
+    residual_lost = float(np.sum(curtailment_outputs["pv_curtailed_residual_lost_mwh"]))
 
     rows = [
         ("PV Capture Rate", pv_capture_rate_pct, "%"),
@@ -1185,6 +1226,11 @@ def build_summary_table(
         ("Cashflow charge aFRR", afrr_charge_cost, "EUR"),
         ("Coût cycle aFRR", afrr_cycle_cost, "EUR"),
         ("Revenu net aFRR", afrr_net_revenue, "EUR"),
+        ("TSO/DSO curtailed energy", tso_dso_curtailed, "MWh"),
+        ("Self-curtailed energy", self_curtailed, "MWh"),
+        ("Total curtailed PV candidate energy", candidate_curtailed, "MWh"),
+        ("Curtailed PV recovered by battery", recovered_to_battery, "MWh"),
+        ("Residual curtailed PV energy lost", residual_lost, "MWh"),
         ("Revenu PV spécifique", pv_rev_keur_per_mw, "kEUR/MW"),
         ("Revenu BESS spécifique", bess_rev_keur_per_mw, "kEUR/MW"),
         ("Revenu PV spécifique énergie", pv_rev_eur_per_mwh, "€/MWh"),
@@ -1206,6 +1252,7 @@ def monthly_dataframe(
     pure_pv_benchmark: Dict[str, np.ndarray],
     pv_dc_mw: float,
     batt_power_mw: float,
+    curtailment_outputs: Dict[str, np.ndarray],
 ) -> pd.DataFrame:
     idx = pd.date_range(f"{DEFAULT_YEAR}-01-01 00:00:00", periods=HOURS_PER_YEAR, freq="h")
 
@@ -1218,6 +1265,9 @@ def monthly_dataframe(
         "shifted_mwh": result["discharge"],
         "grid_charge_mwh": result["grid_charge"],
         "pv_to_batt_mwh": result["pv_to_batt"],
+        "pv_curtailed_to_battery_mwh_actual": curtailment_outputs["pv_curtailed_to_battery_mwh_actual"],
+        "pv_curtailment_candidate_mwh": curtailment_outputs["pv_curtailment_candidate_mwh"],
+        "pv_curtailed_residual_lost_mwh": curtailment_outputs["pv_curtailed_residual_lost_mwh"],
         "pv_only_direct_mwh": pure_pv_benchmark["pv_only_direct_mwh"],
         "pv_only_revenue": pure_pv_benchmark["pv_only_revenue_eur"],
         "afrr_charge_mwh": result["afrr_charge_hourly_mwh"] if "afrr_charge_hourly_mwh" in result else np.zeros(HOURS_PER_YEAR),
@@ -1231,12 +1281,7 @@ def monthly_dataframe(
     df["month"] = df["datetime"].dt.strftime("%Y-%m")
     monthly = df.groupby("month", as_index=False).sum(numeric_only=True)
 
-    monthly["bess_net_revenue"] = (
-        monthly["batt_sale_revenue"]
-        - monthly["grid_charge_cost"]
-        + monthly["afrr_net_revenue"]
-    )
-
+    monthly["bess_net_revenue"] = monthly["batt_sale_revenue"] - monthly["grid_charge_cost"] + monthly["afrr_net_revenue"]
     monthly["net_revenue"] = monthly["pv_direct_revenue"] + monthly["bess_net_revenue"]
 
     monthly["pv_revenue_keur_per_mw"] = monthly["pv_direct_revenue"] / max(pv_dc_mw, 1e-12) / 1000.0
@@ -1247,6 +1292,7 @@ def monthly_dataframe(
     monthly["bess_revenue_eur_per_mwh"] = monthly["bess_net_revenue"] / monthly["bess_total_discharged_mwh"].clip(lower=1e-12)
 
     return monthly
+
 
 def build_inputs_dataframe(inputs: SimulationInputs) -> pd.DataFrame:
     rows = [
@@ -1278,8 +1324,18 @@ def build_inputs_dataframe(inputs: SimulationInputs) -> pd.DataFrame:
         ("afrr_night_end_hour", inputs.afrr_night_end_hour),
         ("afrr_pv_zero_tolerance_mwh", inputs.afrr_pv_zero_tolerance_mwh),
         ("afrr_n_qh_per_side", inputs.afrr_n_qh_per_side),
+        ("enable_tso_dso_curtailment", inputs.enable_tso_dso_curtailment),
+        ("enable_self_curtailment", inputs.enable_self_curtailment),
+        ("curtailment_threshold_eur_per_mwh", inputs.curtailment_threshold_eur_per_mwh),
+        ("pv_commercial_structure", inputs.pv_commercial_structure),
+        ("cfd_price_eur_per_mwh", inputs.cfd_price_eur_per_mwh),
+        ("negative_price_rule", inputs.negative_price_rule),
+        ("consecutive_negative_hours_limit", inputs.consecutive_negative_hours_limit),
+        ("ppa_price_eur_per_mwh", inputs.ppa_price_eur_per_mwh),
+        ("charge_battery_if_curtailment", inputs.charge_battery_if_curtailment),
     ]
     return pd.DataFrame(rows, columns=["Parameter", "Value"])
+
 
 def to_excel_bytes(
     inputs_df: pd.DataFrame,
@@ -1290,20 +1346,18 @@ def to_excel_bytes(
     afrr_daily_log_df: pd.DataFrame | None = None,
 ) -> bytes:
     output = io.BytesIO()
-    try:
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            inputs_df.to_excel(writer, sheet_name="Inputs", index=False)
-            summary_df.to_excel(writer, sheet_name="Summary", index=False)
-            monthly_df.to_excel(writer, sheet_name="Monthly", index=False)
-            hourly_df.to_excel(writer, sheet_name="Hourly", index=False)
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        inputs_df.to_excel(writer, sheet_name="Inputs", index=False)
+        summary_df.to_excel(writer, sheet_name="Summary", index=False)
+        monthly_df.to_excel(writer, sheet_name="Monthly", index=False)
+        hourly_df.to_excel(writer, sheet_name="Hourly", index=False)
 
-            if afrr_qh_df is not None:
-                afrr_qh_df.to_excel(writer, sheet_name="aFRR_QH", index=False)
+        if afrr_qh_df is not None:
+            afrr_qh_df.to_excel(writer, sheet_name="aFRR_QH", index=False)
 
-            if afrr_daily_log_df is not None:
-                afrr_daily_log_df.to_excel(writer, sheet_name="aFRR_Daily_Log", index=False)
-    except ImportError:
-        raise ImportError("Le package openpyxl n'est pas installé. Ajoute 'openpyxl' dans requirements.txt.")
+        if afrr_daily_log_df is not None:
+            afrr_daily_log_df.to_excel(writer, sheet_name="aFRR_Daily_Log", index=False)
+
     return output.getvalue()
 
 
@@ -1319,17 +1373,13 @@ def app():
             - La batterie peut **charger depuis le PV et/ou depuis le réseau**.
             - Le moteur choisit la meilleure valorisation économique entre vente immédiate du PV, stockage PV et charge réseau.
             - Les **revenus de services système la nuit** sont ajoutés comme un **revenu fixe par nuit**, sans contrainte de capacité ni de SOC.
-            - Le profil solaire standard est une **forme France standardisée**. Un CSV 8760 peut la remplacer.
             - L'optimisation principale utilise une **programmation dynamique discrétisée sur le SOC**.
-            - En option, une couche séparée **aFRR énergie quart-horaire** est ajoutée **la nuit uniquement** et **uniquement sans production PV**.
-            - Côté wholesale, la décharge est autorisée seulement si:
-              1. le prix est dans le quantile haut journalier
-              2. le prix dépasse le coût moyen stocké + le spread minimum
-            - En cas de conflit de décharge wholesale / aFRR, un arbitrage quart-horaire choisit le marché au prix de décharge le plus élevé.
-            - Un benchmark **PV-only Project** est aussi calculé pour comparer la valeur ajoutée de l'hybridation.
-            - Les **capture rates** appliquent une réduction globale aux prix effectivement monétisés:
-              - PV Capture Rate sur les prix PV
-              - BESS Capture Rate sur les prix wholesale batterie et aFRR
+            - Une couche séparée **aFRR quart-horaire** peut être ajoutée la nuit sans production PV.
+            - La curtailment PV peut être:
+              1. imposée par TSO/DSO
+              2. auto-courtailment selon structure commerciale
+            - Option supplémentaire: **Charge Battery if Curtailment**
+              pour récupérer une partie de l'énergie autrement curtailed dans la batterie.
             """
         )
 
@@ -1342,12 +1392,7 @@ def app():
         productible = st.number_input("Productible PV (kWh/kWc/an)", min_value=0.0, value=1200.0, step=10.0)
         grid_export_limit_mw = st.number_input("Limite injection réseau (MW)", min_value=0.0, value=100.0, step=1.0)
         cycle_cost = st.number_input("Coût de cycle batterie (EUR/MWh)", value=5.0)
-        min_spread_arbitrage = st.number_input(
-            "Minimum Spread for Arbitrage (EUR/MWh)",
-            min_value=0.0,
-            value=10.0,
-            step=1.0,
-        )
+        min_spread_arbitrage = st.number_input("Minimum Spread for Arbitrage (EUR/MWh)", min_value=0.0, value=10.0, step=1.0)
         charge_quantile = st.slider("Quantile charge (%)", 0, 50, 20)
         discharge_quantile = st.slider("Quantile décharge (%)", 0, 100, 80)
         max_cycles = st.number_input("Cycles max / jour", min_value=0.0, value=1.0, step=0.1)
@@ -1357,43 +1402,22 @@ def app():
         availability_pct = st.number_input("Disponibilité globale centrale (%)", min_value=0.0, max_value=100.0, value=98.0, step=0.1)
         eta_charge = st.number_input("Rendement de charge batterie (%)", min_value=1.0, max_value=100.0, value=95.0, step=0.5) / 100.0
         eta_discharge = st.number_input("Rendement de décharge batterie (%)", min_value=1.0, max_value=100.0, value=95.0, step=0.5) / 100.0
-        pv_capture_rate_pct = st.number_input(
-            "PV Capture Rate (%)",
-            min_value=0.0,
-            max_value=100.0,
-            value=100.0,
-            step=1.0,
-        )
+        pv_capture_rate_pct = st.number_input("PV Capture Rate (%)", min_value=0.0, max_value=100.0, value=100.0, step=1.0)
 
     with col3:
         nightly_bess_revenue = st.number_input("Revenu services système nuit (EUR/nuit)", min_value=0.0, value=0.0, step=10.0)
         soc_steps = st.slider("Nombre de pas de SOC pour l'optimisation", min_value=21, max_value=201, value=101, step=10)
         initial_soc = st.number_input("SOC initial batterie (MWh)", min_value=0.0, value=0.0, step=1.0)
         final_soc = st.number_input("SOC final cible batterie (MWh)", min_value=0.0, value=0.0, step=1.0)
-        bess_capture_rate_pct = st.number_input(
-            "BESS Capture Rate (%)",
-            min_value=0.0,
-            max_value=100.0,
-            value=100.0,
-            step=1.0,
-        )
+        bess_capture_rate_pct = st.number_input("BESS Capture Rate (%)", min_value=0.0, max_value=100.0, value=100.0, step=1.0)
 
     st.subheader("Courbe solaire 8760h")
-    solar_mode = st.radio(
-        "Source du profil solaire",
-        ["Courbe standard France", "Upload CSV 8760"],
-        horizontal=True,
-    )
+    solar_mode = st.radio("Source du profil solaire", ["Courbe standard France", "Upload CSV 8760"], horizontal=True)
 
     solar_upload = None
     uploaded_solar_is_relative = True
-
     if solar_mode == "Upload CSV 8760":
-        solar_upload = st.file_uploader(
-            "Upload du profil solaire CSV (8760 lignes, première colonne numérique)",
-            type=["csv"],
-            key="solar_csv",
-        )
+        solar_upload = st.file_uploader("Upload du profil solaire CSV (8760 lignes, première colonne numérique)", type=["csv"], key="solar_csv")
         uploaded_solar_is_relative = st.checkbox(
             "Le CSV uploadé est un profil relatif à normaliser sur le productible annuel (sinon : MWh nets horaires absolus)",
             value=True,
@@ -1403,7 +1427,6 @@ def app():
     pv_price_mode = st.radio("Source du prix de vente du PV", ["Prix moyen annuel", "Upload CSV 8760"], horizontal=True)
     pv_price_value = None
     pv_price_upload = None
-
     if pv_price_mode == "Prix moyen annuel":
         pv_price_value = st.number_input("Prix moyen PV (EUR/MWh)", value=55.0, step=1.0)
     else:
@@ -1413,25 +1436,54 @@ def app():
     batt_sell_mode = st.radio("Source du prix de vente de l'énergie shiftée", ["Prix moyen annuel", "Upload CSV 8760"], horizontal=True)
     batt_sell_value = None
     batt_sell_upload = None
-
     if batt_sell_mode == "Prix moyen annuel":
         batt_sell_value = st.number_input("Prix moyen vente batterie (EUR/MWh)", value=90.0, step=1.0)
     else:
         batt_sell_upload = st.file_uploader("Upload prix vente batterie CSV (8760 lignes)", type=["csv"], key="batt_sell")
 
     st.subheader("Prix d'achat réseau pour charge batterie")
-    grid_mode = st.radio(
-        "Source du prix d'achat réseau",
-        ["Identique au prix vente batterie", "Prix moyen annuel", "Upload CSV 8760"],
-        horizontal=True,
-    )
+    grid_mode = st.radio("Source du prix d'achat réseau", ["Identique au prix vente batterie", "Prix moyen annuel", "Upload CSV 8760"], horizontal=True)
     grid_buy_value = None
     grid_buy_upload = None
-
     if grid_mode == "Prix moyen annuel":
         grid_buy_value = st.number_input("Prix moyen achat réseau (EUR/MWh)", value=55.0, step=1.0)
     elif grid_mode == "Upload CSV 8760":
         grid_buy_upload = st.file_uploader("Upload prix achat réseau CSV (8760 lignes)", type=["csv"], key="grid_buy")
+
+    st.subheader("Curtailment")
+    cur1, cur2, cur3 = st.columns(3)
+
+    with cur1:
+        tso_dso_curtailment = st.radio("TSO/DSO Curtailment", ["No", "Yes"], horizontal=True)
+        tso_dso_upload = None
+        if tso_dso_curtailment == "Yes":
+            tso_dso_upload = st.file_uploader("Upload Annual Curtailment Curve Excel (12 monthly %)", type=["xlsx", "xls"], key="tso_dso_curve")
+
+    with cur2:
+        self_curtailment = st.radio("Self Curtailment", ["No", "Yes"], horizontal=True)
+        curtailment_threshold = -1.0
+        pv_structure = "Fully merchant"
+        cfd_price = 0.0
+        negative_price_rule = False
+        consecutive_negative_hours_limit = 6
+        ppa_price = 0.0
+
+        if self_curtailment == "Yes":
+            curtailment_threshold = st.number_input("Curtailment Threshold (EUR/MWh)", value=-1.0, step=1.0)
+            pv_structure = st.radio("PV Commercial Structure", ["Fully merchant", "With CfD", "With PPA"], horizontal=False)
+
+            if pv_structure == "With CfD":
+                cfd_price = st.number_input("CfD Price (EUR/MWh)", value=50.0, step=1.0)
+                negative_price_rule_str = st.radio("Negative Price Rule", ["No", "Yes"], horizontal=True)
+                negative_price_rule = negative_price_rule_str == "Yes"
+                if negative_price_rule:
+                    consecutive_negative_hours_limit = int(st.number_input("Consecutive Negative Hours Limit", min_value=1, value=6, step=1))
+
+            if pv_structure == "With PPA":
+                ppa_price = st.number_input("PPA Price (EUR/MWh)", value=50.0, step=1.0)
+
+    with cur3:
+        charge_battery_if_curtailment = st.radio("Charge Battery if Curtailment", ["No", "Yes"], horizontal=True) == "Yes"
 
     st.subheader("aFRR énergie (quart-horaire)")
     enable_afrr = st.checkbox("Activer l'arbitrage aFRR de nuit", value=False)
@@ -1448,56 +1500,20 @@ def app():
         c_afrr1, c_afrr2, c_afrr3 = st.columns(3)
 
         with c_afrr1:
-            afrr_charge_upload = st.file_uploader(
-                "Upload prix aFRR charge CSV (35040 lignes)",
-                type=["csv"],
-                key="afrr_charge",
-            )
-            afrr_discharge_upload = st.file_uploader(
-                "Upload prix aFRR décharge CSV (35040 lignes)",
-                type=["csv"],
-                key="afrr_discharge",
-            )
+            afrr_charge_upload = st.file_uploader("Upload prix aFRR charge CSV (35040 lignes)", type=["csv"], key="afrr_charge")
+            afrr_discharge_upload = st.file_uploader("Upload prix aFRR décharge CSV (35040 lignes)", type=["csv"], key="afrr_discharge")
 
         with c_afrr2:
-            afrr_min_spread = st.number_input(
-                "Spread minimum aFRR net (EUR/MWh)",
-                min_value=0.0,
-                value=10.0,
-                step=1.0,
-            )
-            afrr_cycle_cost = st.number_input(
-                "Coût de cycle aFRR (EUR/MWh)",
-                min_value=0.0,
-                value=float(cycle_cost),
-                step=1.0,
-            )
+            afrr_min_spread = st.number_input("Spread minimum aFRR net (EUR/MWh)", min_value=0.0, value=10.0, step=1.0)
+            afrr_cycle_cost = st.number_input("Coût de cycle aFRR (EUR/MWh)", min_value=0.0, value=float(cycle_cost), step=1.0)
 
         with c_afrr3:
             afrr_night_start_hour = st.slider("Début nuit", 0, 23, 20)
             afrr_night_end_hour = st.slider("Fin nuit", 0, 23, 8)
-            afrr_max_events_per_day = st.number_input(
-                "Nombre max d'événements aFRR / jour",
-                min_value=1,
-                value=1,
-                step=1,
-            )
+            afrr_max_events_per_day = st.number_input("Nombre max d'événements aFRR / jour", min_value=1, value=1, step=1)
 
     st.markdown("---")
     run = st.button("Lancer la simulation", type="primary")
-
-    with st.expander("Format des CSV attendus", expanded=False):
-        st.markdown(
-            """
-            - **8760 lignes**, une heure par ligne, **première colonne numérique** pour les fichiers horaires.
-            - **35040 lignes**, un quart d'heure par ligne, **première colonne numérique** pour les fichiers aFRR.
-            - Pas besoin d'en-tête spécifique.
-            - Les décimales avec **point ou virgule** sont acceptées.
-            - Pour le solaire uploadé :
-              - soit **profil relatif** renormalisé sur le productible annuel,
-              - soit **MWh nets horaires absolus** si la case correspondante est décochée.
-            """
-        )
 
     if not run:
         return
@@ -1507,23 +1523,18 @@ def app():
     try:
         if batt_energy_mwh < batt_power_mw and batt_energy_mwh > 0:
             st.warning("Attention : la capacité batterie est inférieure à 1h de puissance. C'est possible, mais atypique.")
-
         if initial_soc > batt_energy_mwh:
             st.error("Le SOC initial ne peut pas dépasser la capacité batterie.")
             return
-
         if final_soc > batt_energy_mwh:
             st.error("Le SOC final ne peut pas dépasser la capacité batterie.")
             return
 
+        # Base PV
         if solar_mode == "Courbe standard France":
             solar_relative = build_standard_france_solar_profile()
-            pv_hourly_mwh, pv_stats = build_pv_generation_mwh(
-                solar_relative,
-                pv_dc_mw,
-                productible,
-                pv_losses_pct,
-                availability_pct,
+            base_pv_hourly_mwh, pv_stats = build_pv_generation_mwh(
+                solar_relative, pv_dc_mw, productible, pv_losses_pct, availability_pct
             )
         else:
             if solar_upload is None:
@@ -1531,18 +1542,13 @@ def app():
                 return
 
             uploaded = _read_single_column_csv(solar_upload)
-
             if uploaded_solar_is_relative:
-                pv_hourly_mwh, pv_stats = build_pv_generation_mwh(
-                    uploaded,
-                    pv_dc_mw,
-                    productible,
-                    pv_losses_pct,
-                    availability_pct,
+                base_pv_hourly_mwh, pv_stats = build_pv_generation_mwh(
+                    uploaded, pv_dc_mw, productible, pv_losses_pct, availability_pct
                 )
             else:
-                pv_hourly_mwh = np.maximum(uploaded, 0.0) * pv_dc_mw
-                annual_net = float(pv_hourly_mwh.sum())
+                base_pv_hourly_mwh = np.maximum(uploaded, 0.0) * pv_dc_mw
+                annual_net = float(base_pv_hourly_mwh.sum())
                 annual_dc = float(pv_dc_mw * productible)
                 pv_stats = {
                     "annual_dc_mwh": annual_dc,
@@ -1551,17 +1557,8 @@ def app():
                 }
 
         # Raw price curves
-        pv_price_curve_raw = (
-            _make_flat_curve(pv_price_value)
-            if pv_price_mode == "Prix moyen annuel"
-            else _read_single_column_csv(pv_price_upload)
-        )
-
-        batt_sell_curve_raw = (
-            _make_flat_curve(batt_sell_value)
-            if batt_sell_mode == "Prix moyen annuel"
-            else _read_single_column_csv(batt_sell_upload)
-        )
+        pv_price_curve_raw = _make_flat_curve(pv_price_value) if pv_price_mode == "Prix moyen annuel" else _read_single_column_csv(pv_price_upload)
+        batt_sell_curve_raw = _make_flat_curve(batt_sell_value) if batt_sell_mode == "Prix moyen annuel" else _read_single_column_csv(batt_sell_upload)
 
         if grid_mode == "Identique au prix vente batterie":
             grid_buy_curve_raw = batt_sell_curve_raw.copy()
@@ -1572,20 +1569,18 @@ def app():
 
         afrr_charge_curve_qh_raw = None
         afrr_discharge_curve_qh_raw = None
-
         if enable_afrr:
             if afrr_charge_upload is None or afrr_discharge_upload is None:
                 st.error("Merci d'uploader les deux CSV aFRR quart-horaires.")
                 return
-
             afrr_charge_curve_qh_raw = _read_single_column_csv_qh(afrr_charge_upload)
             afrr_discharge_curve_qh_raw = _read_single_column_csv_qh(afrr_discharge_upload)
 
-        # Effective price curves after capture rates
+        # Capture rates
         pv_capture_factor = pv_capture_rate_pct / 100.0
         bess_capture_factor = bess_capture_rate_pct / 100.0
 
-        pv_price_curve_effective = pv_price_curve_raw * pv_capture_factor
+        pv_spot_price_effective = pv_price_curve_raw * pv_capture_factor
         batt_sell_curve_effective = batt_sell_curve_raw * bess_capture_factor
         grid_buy_curve_effective = grid_buy_curve_raw * bess_capture_factor
 
@@ -1595,9 +1590,53 @@ def app():
             afrr_charge_curve_qh_effective = afrr_charge_curve_qh_raw * bess_capture_factor
             afrr_discharge_curve_qh_effective = afrr_discharge_curve_qh_raw * bess_capture_factor
 
+        # 1) TSO/DSO curtailment
+        if tso_dso_curtailment == "Yes":
+            if tso_dso_upload is None:
+                st.error("Merci d'uploader la courbe annuelle de curtailment TSO/DSO.")
+                return
+            tso_dso_monthly_pct = read_monthly_curtailment_excel(tso_dso_upload)
+            tso_out = apply_tso_dso_curtailment(base_pv_hourly_mwh, tso_dso_monthly_pct / 100.0)
+        else:
+            tso_out = {
+                "pv_after_tso_dso_mwh": base_pv_hourly_mwh.copy(),
+                "tso_dso_curtailed_mwh": np.zeros(HOURS_PER_YEAR, dtype=float),
+                "tso_dso_curtailment_flag": np.zeros(HOURS_PER_YEAR, dtype=int),
+                "tso_dso_monthly_pct_hourly": np.zeros(HOURS_PER_YEAR, dtype=float),
+            }
+            tso_dso_monthly_pct = np.zeros(12, dtype=float)
+
+        # 2) Self curtailment
+        self_out = apply_self_curtailment(
+            pv_hourly_mwh=tso_out["pv_after_tso_dso_mwh"],
+            pv_spot_price_raw=pv_price_curve_raw,
+            pv_spot_price_effective=pv_spot_price_effective,
+            enable_self_curtailment=(self_curtailment == "Yes"),
+            pv_commercial_structure=pv_structure,
+            curtailment_threshold_eur_per_mwh=curtailment_threshold,
+            cfd_price_eur_per_mwh=cfd_price,
+            negative_price_rule=negative_price_rule,
+            consecutive_negative_hours_limit=consecutive_negative_hours_limit,
+            ppa_price_eur_per_mwh=ppa_price,
+        )
+
+        # Curtailment pipeline
+        pv_after_tso_dso = tso_out["pv_after_tso_dso_mwh"]
+        pv_after_self = self_out["pv_after_self_curtailment_mwh"]
+        pv_curtailment_candidate_mwh = np.maximum(base_pv_hourly_mwh - pv_after_self, 0.0)
+
+        if charge_battery_if_curtailment:
+            curtailed_pv_recoverable_mwh = pv_curtailment_candidate_mwh.copy()
+        else:
+            curtailed_pv_recoverable_mwh = np.zeros(HOURS_PER_YEAR, dtype=float)
+
+        pv_sellable_for_dispatch_mwh = pv_after_self.copy()
+        pv_effective_price_for_revenue = self_out["pv_effective_price_eur_per_mwh"]
+
+        # PV-only benchmark uses only sellable curtailed PV
         pure_pv_benchmark = build_pure_pv_benchmark(
-            pv_generation_mwh=pv_hourly_mwh,
-            pv_price=pv_price_curve_effective,
+            pv_generation_mwh=pv_sellable_for_dispatch_mwh,
+            pv_price=pv_effective_price_for_revenue,
             grid_export_limit_mw=grid_export_limit_mw,
         )
 
@@ -1610,10 +1649,11 @@ def app():
             plant_availability_pct=availability_pct,
             eta_charge=eta_charge,
             eta_discharge=eta_discharge,
-            pv_price=pv_price_curve_effective,
+            pv_price=pv_effective_price_for_revenue,
             batt_sell_price=batt_sell_curve_effective,
             grid_buy_price=grid_buy_curve_effective,
-            solar_profile=pv_hourly_mwh,
+            solar_profile=pv_sellable_for_dispatch_mwh,
+            curtailed_pv_recoverable_mwh=curtailed_pv_recoverable_mwh,
             nightly_bess_revenue_eur=nightly_bess_revenue,
             soc_steps=soc_steps,
             initial_soc_mwh=initial_soc,
@@ -1636,12 +1676,42 @@ def app():
             afrr_night_end_hour=int(afrr_night_end_hour),
             afrr_pv_zero_tolerance_mwh=PV_ZERO_TOLERANCE_MWH,
             afrr_n_qh_per_side=4,
+            enable_tso_dso_curtailment=(tso_dso_curtailment == "Yes"),
+            tso_dso_monthly_curtailment_pct=tso_dso_monthly_pct,
+            enable_self_curtailment=(self_curtailment == "Yes"),
+            curtailment_threshold_eur_per_mwh=curtailment_threshold,
+            pv_commercial_structure=pv_structure,
+            cfd_price_eur_per_mwh=cfd_price,
+            negative_price_rule=negative_price_rule,
+            consecutive_negative_hours_limit=consecutive_negative_hours_limit,
+            ppa_price_eur_per_mwh=ppa_price,
+            charge_battery_if_curtailment=charge_battery_if_curtailment,
         )
-        
+
         inputs_df = build_inputs_dataframe(sim_inputs)
-        
+
         with st.spinner("Optimisation économique annuelle en cours..."):
             result = optimize_dispatch_dp(sim_inputs)
+
+        # Actual recovered curtailed PV = what the DP used from recoverable stream
+        pv_curtailed_to_battery_actual = result["pv_curtailed_to_battery"]
+        pv_curtailed_residual_lost_mwh = np.maximum(pv_curtailment_candidate_mwh - pv_curtailed_to_battery_actual, 0.0)
+
+        curtailment_outputs = {
+            "base_pv_generation_mwh": base_pv_hourly_mwh,
+            "pv_after_tso_dso_curtailment_mwh": pv_after_tso_dso,
+            "pv_after_self_curtailment_mwh": pv_after_self,
+            "tso_dso_curtailed_mwh": tso_out["tso_dso_curtailed_mwh"],
+            "self_curtailed_mwh": self_out["self_curtailed_mwh"],
+            "pv_curtailment_candidate_mwh": pv_curtailment_candidate_mwh,
+            "pv_curtailed_to_battery_mwh_actual": pv_curtailed_to_battery_actual,
+            "pv_curtailed_residual_lost_mwh": pv_curtailed_residual_lost_mwh,
+            "pv_effective_price_eur_per_mwh": pv_effective_price_for_revenue,
+            "tso_dso_curtailment_flag": tso_out["tso_dso_curtailment_flag"],
+            "self_curtailment_flag": self_out["self_curtailment_flag"],
+            "self_curtailment_reason": self_out["self_curtailment_reason"],
+            "pv_commercial_structure_hourly": self_out["pv_commercial_structure_hourly"],
+        }
 
         afrr_result = None
         reconciliation = None
@@ -1650,27 +1720,15 @@ def app():
         if sim_inputs.enable_afrr:
             with st.spinner("Simulation aFRR quart-horaire de nuit en cours..."):
                 afrr_result = simulate_afrr_night_arbitrage(sim_inputs, result)
-
-                reconciliation = reconcile_wholesale_afrr_dispatch_qh(
-                    result_hourly=result,
-                    afrr_result=afrr_result,
-                    inputs=sim_inputs,
-                )
-
-                final_result = build_final_result_after_market_arbitration(
-                    base_result=result,
-                    reconciliation=reconciliation,
-                    inputs=sim_inputs,
-                )
+                reconciliation = reconcile_wholesale_afrr_dispatch_qh(result_hourly=result, afrr_result=afrr_result, inputs=sim_inputs)
+                final_result = build_final_result_after_market_arbitration(base_result=result, reconciliation=reconciliation, inputs=sim_inputs)
 
         if reconciliation is not None:
             combined_qh_df = pd.DataFrame({
                 "datetime": reconciliation["datetime_qh"],
                 "combined_charge_to_soc_qh_mwh": reconciliation["combined_charge_to_soc_qh_mwh"],
                 "combined_discharge_from_soc_qh_mwh": reconciliation["combined_discharge_from_soc_qh_mwh"],
-                "wholesale_charge_to_soc_qh_mwh": (
-                    reconciliation["wholesale_pv_to_batt_qh_mwh"] + reconciliation["wholesale_grid_charge_qh_mwh"]
-                ) * sim_inputs.eta_charge,
+                "wholesale_charge_to_soc_qh_mwh": (reconciliation["wholesale_pv_to_batt_qh_mwh"] + reconciliation["wholesale_grid_charge_qh_mwh"]) * sim_inputs.eta_charge,
                 "wholesale_discharge_from_soc_qh_mwh": reconciliation["wholesale_discharge_qh_mwh"] / max(sim_inputs.eta_discharge, 1e-12),
                 "afrr_charge_to_soc_qh_mwh": reconciliation["afrr_charge_qh_mwh"] * sim_inputs.eta_charge,
                 "afrr_discharge_from_soc_qh_mwh": reconciliation["afrr_discharge_qh_mwh"] / max(sim_inputs.eta_discharge, 1e-12),
@@ -1715,15 +1773,26 @@ def app():
             batt_power_mw,
             pv_capture_rate_pct,
             bess_capture_rate_pct,
+            curtailment_outputs,
         )
-        monthly_df = monthly_dataframe(final_result, pure_pv_benchmark, pv_dc_mw, batt_power_mw)
+
+        monthly_df = monthly_dataframe(final_result, pure_pv_benchmark, pv_dc_mw, batt_power_mw, curtailment_outputs)
 
         idx = pd.date_range(f"{DEFAULT_YEAR}-01-01 00:00:00", periods=HOURS_PER_YEAR, freq="h")
         hourly_df = pd.DataFrame({
             "datetime": idx,
-            "pv_generation_mwh": pv_hourly_mwh,
+            "base_pv_generation_mwh": base_pv_hourly_mwh,
+            "pv_after_tso_dso_curtailment_mwh": pv_after_tso_dso,
+            "pv_after_self_curtailment_mwh": pv_after_self,
+            "pv_curtailment_candidate_mwh": pv_curtailment_candidate_mwh,
+            "pv_curtailed_to_battery_mwh": pv_curtailed_to_battery_actual,
+            "pv_curtailed_residual_lost_mwh": pv_curtailed_residual_lost_mwh,
+            "tso_dso_curtailment_flag": tso_out["tso_dso_curtailment_flag"],
+            "self_curtailment_flag": self_out["self_curtailment_flag"],
+            "self_curtailment_reason": self_out["self_curtailment_reason"],
+            "pv_commercial_structure": self_out["pv_commercial_structure_hourly"],
             "pv_price_raw_eur_per_mwh": pv_price_curve_raw,
-            "pv_price_effective_eur_per_mwh": pv_price_curve_effective,
+            "pv_price_effective_eur_per_mwh": pv_effective_price_for_revenue,
             "pv_only_direct_mwh": pure_pv_benchmark["pv_only_direct_mwh"],
             "pv_only_revenue_eur": pure_pv_benchmark["pv_only_revenue_eur"],
             "battery_sell_price_raw_eur_per_mwh": batt_sell_curve_raw,
@@ -1772,104 +1841,7 @@ def app():
                 "bess_capture_rate_pct": np.full(QH_PER_YEAR, bess_capture_rate_pct),
             })
 
-        debug = hourly_df[
-            (hourly_df["datetime"] >= pd.Timestamp(f"{DEFAULT_YEAR}-06-01 00:00:00")) &
-            (hourly_df["datetime"] < pd.Timestamp(f"{DEFAULT_YEAR}-06-04 00:00:00"))
-        ].copy()
-
-        thresholds_debug = hourly_df[[
-            "datetime",
-            "grid_buy_price_effective_eur_per_mwh",
-            "battery_sell_price_effective_eur_per_mwh",
-        ]].copy()
-
-        thresholds_debug["day"] = thresholds_debug["datetime"].dt.date
-        thresholds_debug["charge_threshold_day"] = thresholds_debug.groupby("day")["grid_buy_price_effective_eur_per_mwh"].transform(
-            lambda x: np.percentile(x, charge_quantile)
-        )
-        thresholds_debug["discharge_threshold_day"] = thresholds_debug.groupby("day")["battery_sell_price_effective_eur_per_mwh"].transform(
-            lambda x: np.percentile(x, discharge_quantile)
-        )
-
-        debug = debug.merge(
-            thresholds_debug[[
-                "datetime",
-                "charge_threshold_day",
-                "discharge_threshold_day",
-            ]],
-            on="datetime",
-            how="left"
-        )
-
-        debug["day"] = debug["datetime"].dt.date
-        debug["charge_allowed"] = debug["grid_buy_price_effective_eur_per_mwh"] <= debug["charge_threshold_day"]
-        debug["discharge_allowed_quantile_only"] = debug["battery_sell_price_effective_eur_per_mwh"] >= debug["discharge_threshold_day"]
-        debug["discharge_allowed_spread_only"] = debug["battery_sell_price_effective_eur_per_mwh"] >= debug["required_discharge_price_eur_per_mwh"].fillna(1e30)
-        debug["discharge_allowed_final"] = (
-            (debug["battery_sell_price_effective_eur_per_mwh"] >= debug["discharge_threshold_day"]) &
-            (debug["battery_sell_price_effective_eur_per_mwh"] >= debug["required_discharge_price_eur_per_mwh"].fillna(1e30))
-        )
-
-        st.subheader("Debug dispatch (3 premiers jours de juin)")
-        st.dataframe(
-            debug[[
-                "datetime",
-                "battery_soc_mwh_end",
-                "grid_buy_price_raw_eur_per_mwh",
-                "grid_buy_price_effective_eur_per_mwh",
-                "charge_threshold_day",
-                "battery_sell_price_raw_eur_per_mwh",
-                "battery_sell_price_effective_eur_per_mwh",
-                "discharge_threshold_day",
-                "required_discharge_price_eur_per_mwh",
-                "grid_charge_mwh",
-                "battery_discharge_mwh",
-                "afrr_charge_mwh",
-                "afrr_discharge_mwh",
-                "charge_allowed",
-                "discharge_allowed_quantile_only",
-                "discharge_allowed_spread_only",
-                "discharge_allowed_final",
-            ]],
-            use_container_width=True,
-        )
-
-        st.subheader("Debug SOC combiné quart-horaire (3 premiers jours de juin)")
-        combined_debug = combined_qh_df[
-            (combined_qh_df["datetime"] >= pd.Timestamp(f"{DEFAULT_YEAR}-06-01 00:00:00")) &
-            (combined_qh_df["datetime"] < pd.Timestamp(f"{DEFAULT_YEAR}-06-04 00:00:00"))
-        ].copy()
-
-        combined_debug_nonzero = combined_debug[
-            (combined_debug["combined_charge_to_soc_qh_mwh"] > 1e-9) |
-            (combined_debug["combined_discharge_from_soc_qh_mwh"] > 1e-9)
-        ].copy()
-
-        st.dataframe(
-            combined_debug_nonzero[[
-                "datetime",
-                "wholesale_charge_to_soc_qh_mwh",
-                "wholesale_discharge_from_soc_qh_mwh",
-                "afrr_charge_market_qh_mwh",
-                "afrr_discharge_market_qh_mwh",
-                "afrr_charge_to_soc_qh_mwh",
-                "afrr_discharge_from_soc_qh_mwh",
-                "selected_discharge_channel_qh",
-                "selected_discharge_price_qh",
-                "battery_soc_mwh_end_qh",
-            ]],
-            use_container_width=True,
-        )
-
-        st.write(
-            f"Charge threshold 2025-06-01: "
-            f"{debug.loc[debug['datetime'].dt.date == pd.to_datetime('2025-06-01').date(), 'charge_threshold_day'].iloc[0]:.2f} EUR/MWh"
-        )
-        st.write(
-            f"Discharge threshold 2025-06-01: "
-            f"{debug.loc[debug['datetime'].dt.date == pd.to_datetime('2025-06-01').date(), 'discharge_threshold_day'].iloc[0]:.2f} EUR/MWh"
-        )
-
+        inputs_df = build_inputs_dataframe(sim_inputs)
         excel_bytes = to_excel_bytes(
             inputs_df=inputs_df,
             summary_df=summary_df,
@@ -1894,15 +1866,8 @@ def app():
         st.success("Simulation terminée.")
 
         k1, k2, k3, k4 = st.columns(4)
-        total_revenue_display = (
-            final_result["total_revenue_including_afrr_eur"][0]
-            if "total_revenue_including_afrr_eur" in final_result
-            else final_result["total_revenue"][0]
-        )
-        total_energy_display = (
-            final_result["energy_sold_total_mwh"][0] +
-            (np.sum(final_result["afrr_discharge_hourly_mwh"]) if "afrr_discharge_hourly_mwh" in final_result else 0.0)
-        )
+        total_revenue_display = final_result["total_revenue_including_afrr_eur"][0] if "total_revenue_including_afrr_eur" in final_result else final_result["total_revenue"][0]
+        total_energy_display = final_result["energy_sold_total_mwh"][0] + (np.sum(final_result["afrr_discharge_hourly_mwh"]) if "afrr_discharge_hourly_mwh" in final_result else 0.0)
 
         k1.metric("Revenu total", f"{total_revenue_display:,.0f} EUR")
         k2.metric("Énergie totale vendue", f"{total_energy_display:,.0f} MWh")
@@ -1912,48 +1877,29 @@ def app():
         st.subheader("Synthèse")
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
-        if afrr_result is not None:
-            st.subheader("Journal quotidien aFRR")
-            st.dataframe(afrr_result["afrr_daily_log"], use_container_width=True, hide_index=True)
+        debug = hourly_df[
+            (hourly_df["datetime"] >= pd.Timestamp(f"{DEFAULT_YEAR}-06-01 00:00:00")) &
+            (hourly_df["datetime"] < pd.Timestamp(f"{DEFAULT_YEAR}-06-04 00:00:00"))
+        ].copy()
 
-            st.subheader("Debug aFRR - premières nuits exécutées")
-            debug_afrr = afrr_result["afrr_daily_log"].copy()
-            debug_afrr = debug_afrr[debug_afrr["executed"]].head(10)
-            st.dataframe(debug_afrr, use_container_width=True, hide_index=True)
-
-            if afrr_qh_df is not None:
-                st.subheader("Debug aFRR quart-horaire non nul - 3 premiers jours de juin")
-                afrr_debug_qh = afrr_qh_df[
-                    (afrr_qh_df["datetime"] >= pd.Timestamp(f"{DEFAULT_YEAR}-06-01 00:00:00")) &
-                    (afrr_qh_df["datetime"] < pd.Timestamp(f"{DEFAULT_YEAR}-06-04 00:00:00"))
-                ].copy()
-
-                afrr_debug_qh = afrr_debug_qh[
-                    (afrr_debug_qh["afrr_charge_mwh"] > 1e-9) |
-                    (afrr_debug_qh["afrr_discharge_mwh"] > 1e-9) |
-                    (afrr_debug_qh["wholesale_discharge_mwh"] > 1e-9)
-                ].copy()
-
-                st.dataframe(
-                    afrr_debug_qh[[
-                        "datetime",
-                        "afrr_charge_price_raw_eur_per_mwh",
-                        "afrr_charge_price_effective_eur_per_mwh",
-                        "afrr_discharge_price_raw_eur_per_mwh",
-                        "afrr_discharge_price_effective_eur_per_mwh",
-                        "afrr_charge_mwh",
-                        "afrr_discharge_mwh",
-                        "wholesale_discharge_mwh",
-                        "selected_discharge_channel",
-                        "selected_discharge_price_eur_per_mwh",
-                        "combined_soc_mwh",
-                        "afrr_charge_cost_eur",
-                        "afrr_sale_revenue_eur",
-                        "afrr_cycle_cost_eur",
-                        "afrr_net_revenue_eur",
-                    ]],
-                    use_container_width=True,
-                )
+        st.subheader("Debug curtailment (3 premiers jours de juin)")
+        st.dataframe(
+            debug[[
+                "datetime",
+                "base_pv_generation_mwh",
+                "pv_after_tso_dso_curtailment_mwh",
+                "pv_after_self_curtailment_mwh",
+                "pv_curtailment_candidate_mwh",
+                "pv_curtailed_to_battery_mwh",
+                "pv_curtailed_residual_lost_mwh",
+                "pv_price_raw_eur_per_mwh",
+                "pv_price_effective_eur_per_mwh",
+                "self_curtailment_flag",
+                "self_curtailment_reason",
+                "pv_commercial_structure",
+            ]],
+            use_container_width=True,
+        )
 
         c1, c2 = st.columns(2)
 
@@ -2001,11 +1947,41 @@ def app():
 
         with c3:
             fig3, ax3 = plt.subplots(figsize=(8, 4.5))
+
             ax3.plot(monthly_df["month"], monthly_df["pv_direct_mwh"], label="PV direct")
             ax3.plot(monthly_df["month"], monthly_df["shifted_mwh"], label="Énergie shiftée wholesale")
             ax3.plot(monthly_df["month"], monthly_df["pv_only_direct_mwh"], label="PV-only direct")
+
             if "afrr_discharge_mwh" in monthly_df.columns:
                 ax3.plot(monthly_df["month"], monthly_df["afrr_discharge_mwh"], label="Décharge aFRR")
+
+            if "pv_curtailment_candidate_mwh" in monthly_df.columns:
+                ax3.plot(
+                    monthly_df["month"],
+                    monthly_df["pv_curtailment_candidate_mwh"],
+                    linestyle="--",
+                    marker="o",
+                    label="PV curtailed"
+                )
+
+            if "pv_curtailed_to_battery_mwh_actual" in monthly_df.columns:
+                ax3.plot(
+                    monthly_df["month"],
+                    monthly_df["pv_curtailed_to_battery_mwh_actual"],
+                    linestyle="--",
+                    marker="o",
+                    label="PV curtailed → battery"
+                )
+
+            if "pv_curtailed_residual_lost_mwh" in monthly_df.columns:
+                ax3.plot(
+                    monthly_df["month"],
+                    monthly_df["pv_curtailed_residual_lost_mwh"],
+                    linestyle="--",
+                    marker="o",
+                    label="PV curtailed lost"
+                )
+
             ax3.set_title("Énergies valorisées par mois")
             ax3.set_ylabel("MWh")
             ax3.set_xlabel("Mois")
@@ -2026,8 +2002,19 @@ def app():
             fig, ax1 = plt.subplots(figsize=(12, 5))
             bar_width = 0.03
 
-            ax1.fill_between(df_plot["datetime"], df_plot["pv_direct_mwh"], color="orange", alpha=0.5, label="PV → Réseau")
-            ax1.plot(df_plot["datetime"], df_plot["pv_direct_mwh"], color="orange", linewidth=1.8)
+            ax1.fill_between(
+                df_plot["datetime"],
+                df_plot["pv_direct_mwh"],
+                color="orange",
+                alpha=0.5,
+                label="PV → Réseau"
+            )
+            ax1.plot(
+                df_plot["datetime"],
+                df_plot["pv_direct_mwh"],
+                color="orange",
+                linewidth=1.8
+            )
 
             ax1.bar(
                 df_plot["datetime"],
@@ -2074,6 +2061,33 @@ def app():
                     label="aFRR → Charge",
                     alpha=0.5,
                     color="blue"
+                )
+
+            if "pv_curtailment_candidate_mwh" in df_plot.columns:
+                ax1.plot(
+                    df_plot["datetime"],
+                    df_plot["pv_curtailment_candidate_mwh"],
+                    linestyle="--",
+                    linewidth=1.5,
+                    label="PV curtailed"
+                )
+
+            if "pv_curtailed_to_battery_mwh" in df_plot.columns:
+                ax1.bar(
+                    df_plot["datetime"],
+                    -df_plot["pv_curtailed_to_battery_mwh"],
+                    width=bar_width,
+                    label="PV curtailed → battery",
+                    alpha=0.6
+                )
+
+            if "pv_curtailed_residual_lost_mwh" in df_plot.columns:
+                ax1.plot(
+                    df_plot["datetime"],
+                    df_plot["pv_curtailed_residual_lost_mwh"],
+                    linestyle=":",
+                    linewidth=1.8,
+                    label="PV curtailed lost"
                 )
 
             ax1.axhline(0, linewidth=1)
@@ -2184,7 +2198,7 @@ def app():
             else:
                 st.info("Activez l'aFRR et uploadez les deux fichiers quart-horaires pour afficher le graphique aFRR.")
 
-        c7, _ = st.columns(2)
+        c7, c8 = st.columns(2)
 
         with c7:
             st.subheader("Comparaison Revenu PV-only vs Hybrid")
@@ -2221,6 +2235,46 @@ def app():
 
             st.pyplot(fig_cmp)
             plt.close(fig_cmp)
+
+        with c8:
+            fig8, ax8 = plt.subplots(figsize=(9, 4.8))
+
+            x = np.arange(len(monthly_df))
+            width = 0.26
+
+            if "pv_curtailment_candidate_mwh" in monthly_df.columns:
+                ax8.bar(
+                    x - width,
+                    monthly_df["pv_curtailment_candidate_mwh"].to_numpy(dtype=float),
+                    width=width,
+                    label="PV curtailed"
+                )
+
+            if "pv_curtailed_to_battery_mwh_actual" in monthly_df.columns:
+                ax8.bar(
+                    x,
+                    monthly_df["pv_curtailed_to_battery_mwh_actual"].to_numpy(dtype=float),
+                    width=width,
+                    label="PV curtailed → battery"
+                )
+
+            if "pv_curtailed_residual_lost_mwh" in monthly_df.columns:
+                ax8.bar(
+                    x + width,
+                    monthly_df["pv_curtailed_residual_lost_mwh"].to_numpy(dtype=float),
+                    width=width,
+                    label="PV curtailed lost"
+                )
+
+            ax8.set_title("Curtailment mensuel PV")
+            ax8.set_ylabel("MWh")
+            ax8.set_xlabel("Mois")
+            ax8.set_xticks(x)
+            ax8.set_xticklabels(monthly_df["month"], rotation=45)
+            ax8.legend()
+
+            st.pyplot(fig8)
+            plt.close(fig8)
 
         st.subheader("Table mensuelle")
         st.dataframe(monthly_df, use_container_width=True, hide_index=True)
