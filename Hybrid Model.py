@@ -541,24 +541,24 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
                     discharge_candidate = 0.0
                     cycle_penalty = 0.0
             
-                    if delta_soc > 1e-12:
-                        charge_input = delta_soc / inputs.eta_charge
-            
+                    if delta_soc_after_forced > 1e-12:
+                        charge_input = delta_soc_after_forced / inputs.eta_charge
+                    
                         sellable_pv_to_batt = min(charge_input, pv_sellable_t)
                         remaining_after_sellable = charge_input - sellable_pv_to_batt
                         grid_charge = max(remaining_after_sellable, 0.0)
-            
+                    
                         pv_direct_candidate = pv_sellable_t - sellable_pv_to_batt
-            
+                    
                         if grid_charge > 1e-9 and grid_buy_t > charge_threshold_series[t]:
                             continue
-            
+                    
                         if grid_charge > 1e-9 and (batt_sell_t - grid_buy_t) < inputs.min_spread_arbitrage_eur_per_mwh:
                             continue
-            
-                    elif delta_soc < -1e-12:
-                        discharge_candidate = (-delta_soc) * inputs.eta_discharge
-            
+                    
+                    elif delta_soc_after_forced < -1e-12:
+                        discharge_candidate = (-delta_soc_after_forced) * inputs.eta_discharge
+                    
                         if discharge_candidate > 1e-9:
                             if batt_sell_t < discharge_threshold_series[t]:
                                 continue
@@ -577,14 +577,14 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
                             discharge_candidate = max(discharge_candidate - excess, 0.0)
 
                         if discharge_candidate > 0:
-                            throughput = abs(delta_soc)
+                            throughput = abs(delta_soc_after_forced)
                             cycle_penalty = (throughput / max(inputs.batt_energy_mwh, 1e-12)) * inputs.cycle_cost_eur_per_mwh
 
                     reward = pv_direct_candidate * pv_price_t
 
-                    if delta_soc > 1e-12:
+                    if delta_soc_after_forced > 1e-12:
                         reward -= grid_charge * grid_buy_t
-                    elif delta_soc < -1e-12:
+                    elif delta_soc_after_forced < -1e-12:
                         reward += discharge_candidate * batt_sell_t
                         reward -= cycle_penalty
 
@@ -628,10 +628,12 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
             pv_sellable_t = pv_sellable[t]
             pv_recoverable_t = pv_recoverable[t]
             
+            soc_before = soc_grid[state]
+
             forced_recoverable_input_mwh = min(
                 pv_recoverable_t,
                 inputs.batt_power_mw * DT,
-                max(inputs.batt_energy_mwh - soc_grid[state], 0.0) / max(inputs.eta_charge, 1e-12),
+                max(inputs.batt_energy_mwh - soc_before, 0.0) / max(inputs.eta_charge, 1e-12),
             )
             forced_recoverable_soc_mwh = forced_recoverable_input_mwh * inputs.eta_charge
             min_next_soc = min(soc_before + forced_recoverable_soc_mwh, inputs.batt_energy_mwh)
