@@ -514,51 +514,38 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
                 best_val = neg_inf
                 best_j = -1
                 soc_i = soc_grid[i]
-            
-                # Mandatory technical recovery of curtailed PV first
-                forced_recoverable_input_mwh = min(
-                    pv_recoverable_t,
-                    inputs.batt_power_mw * DT,
-                    max(inputs.batt_energy_mwh - soc_i, 0.0) / max(inputs.eta_charge, 1e-12),
-                )
-                forced_recoverable_soc_mwh = forced_recoverable_input_mwh * inputs.eta_charge
-                
-                min_next_soc = min(soc_i + forced_recoverable_soc_mwh, inputs.batt_energy_mwh)
 
-                for j in transitions[i]:   # IMPORTANT: respect power limits
-                    soc_j = soc_grid[j]
-                
-                    # enforce forced charging as a floor
-                    if soc_j + 1e-12 < min_next_soc:
-                        continue
-                
-                    delta_soc_after_forced = soc_j - min_next_soc
+                for j in transitions[i]:
+                    delta_soc = soc_grid[j] - soc_i
 
                     pv_direct_candidate = pv_sellable_t
                     sellable_pv_to_batt = 0.0
-                    recoverable_pv_to_batt = forced_recoverable_input_mwh
+                    recoverable_pv_to_batt = 0.0
                     grid_charge = 0.0
                     discharge_candidate = 0.0
                     cycle_penalty = 0.0
-            
-                    if delta_soc_after_forced > 1e-12:
-                        charge_input = delta_soc_after_forced / inputs.eta_charge
-                    
-                        sellable_pv_to_batt = min(charge_input, pv_sellable_t)
-                        remaining_after_sellable = charge_input - sellable_pv_to_batt
+
+                    if delta_soc > 1e-12:
+                        charge_input = delta_soc / inputs.eta_charge
+
+                        recoverable_pv_to_batt = min(charge_input, pv_recoverable_t)
+                        remaining_after_recoverable = charge_input - recoverable_pv_to_batt
+
+                        sellable_pv_to_batt = min(remaining_after_recoverable, pv_sellable_t)
+                        remaining_after_sellable = remaining_after_recoverable - sellable_pv_to_batt
+
                         grid_charge = max(remaining_after_sellable, 0.0)
-                    
                         pv_direct_candidate = pv_sellable_t - sellable_pv_to_batt
-                    
+
                         if grid_charge > 1e-9 and grid_buy_t > charge_threshold_series[t]:
                             continue
-                    
-                        if grid_charge > 1e-9 and (batt_sell_t - grid_buy_t) < inputs.min_spread_arbitrage_eur_per_mwh:
+
+                        if (recoverable_pv_to_batt + sellable_pv_to_batt) < charge_input and (batt_sell_t - grid_buy_t) < inputs.min_spread_arbitrage_eur_per_mwh:
                             continue
-                    
-                    elif delta_soc_after_forced < -1e-12:
-                        discharge_candidate = (-delta_soc_after_forced) * inputs.eta_discharge
-                    
+
+                    elif delta_soc < -1e-12:
+                        discharge_candidate = (-delta_soc) * inputs.eta_discharge
+
                         if discharge_candidate > 1e-9:
                             if batt_sell_t < discharge_threshold_series[t]:
                                 continue
@@ -577,14 +564,14 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
                             discharge_candidate = max(discharge_candidate - excess, 0.0)
 
                         if discharge_candidate > 0:
-                            throughput = abs(delta_soc_after_forced)
+                            throughput = abs(delta_soc)
                             cycle_penalty = (throughput / max(inputs.batt_energy_mwh, 1e-12)) * inputs.cycle_cost_eur_per_mwh
 
                     reward = pv_direct_candidate * pv_price_t
 
-                    if delta_soc_after_forced > 1e-12:
+                    if delta_soc > 1e-12:
                         reward -= grid_charge * grid_buy_t
-                    elif delta_soc_after_forced < -1e-12:
+                    elif delta_soc < -1e-12:
                         reward += discharge_candidate * batt_sell_t
                         reward -= cycle_penalty
 
@@ -625,39 +612,27 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
             if next_state < 0:
                 raise RuntimeError(f"Policy failure at t={t}, state={state}")
 
+            delta_soc = soc_grid[next_state] - soc_grid[state]
+            soc[t + 1] = soc_grid[next_state]
+
             pv_sellable_t = pv_sellable[t]
             pv_recoverable_t = pv_recoverable[t]
-            
-            soc_before = soc_grid[state]
 
-            forced_recoverable_input_mwh = min(
-                pv_recoverable_t,
-                inputs.batt_power_mw * DT,
-                max(inputs.batt_energy_mwh - soc_before, 0.0) / max(inputs.eta_charge, 1e-12),
-            )
-            forced_recoverable_soc_mwh = forced_recoverable_input_mwh * inputs.eta_charge
-            min_next_soc = min(soc_before + forced_recoverable_soc_mwh, inputs.batt_energy_mwh)
-
-            soc_target = soc_grid[next_state]
-            
-            if soc_target + 1e-12 < min_next_soc:
-                raise RuntimeError("Invalid policy: below forced SOC")
-            
-            delta_soc = soc_target - min_next_soc
-            soc[t + 1] = soc_grid[next_state]
-            
             pv_direct_candidate = pv_sellable_t
             sellable_pv_to_batt = 0.0
-            recoverable_pv_to_batt = forced_recoverable_input_mwh
+            recoverable_pv_to_batt = 0.0
             grid_charge[t] = 0.0
             discharge[t] = 0.0
 
             if delta_soc > 1e-12:
                 charge_input = delta_soc / inputs.eta_charge
-            
-                sellable_pv_to_batt = min(charge_input, pv_sellable_t)
-                remaining_after_sellable = charge_input - sellable_pv_to_batt
-            
+
+                recoverable_pv_to_batt = min(charge_input, pv_recoverable_t)
+                remaining_after_recoverable = charge_input - recoverable_pv_to_batt
+
+                sellable_pv_to_batt = min(remaining_after_recoverable, pv_sellable_t)
+                remaining_after_sellable = remaining_after_recoverable - sellable_pv_to_batt
+
                 grid_charge[t] = max(remaining_after_sellable, 0.0)
                 pv_direct_candidate = pv_sellable_t - sellable_pv_to_batt
 
