@@ -1653,7 +1653,7 @@ def app():
                 st.error("Merci d'uploader la courbe annuelle de curtailment TSO/DSO.")
                 return
             tso_dso_monthly_pct = read_monthly_curtailment_excel(tso_dso_upload)
-            tso_out = apply_tso_dso_curtailment(base_pv_hourly_mwh, tso_dso_monthly_pct / 100.0)
+            tso_out = apply_tso_dso_curtailment(base_pv_hourly_mwh, tso_dso_monthly_pct)
         else:
             tso_out = {
                 "pv_after_tso_dso_mwh": base_pv_hourly_mwh.copy(),
