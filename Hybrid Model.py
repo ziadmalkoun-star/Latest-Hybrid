@@ -527,20 +527,24 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
 
                     if delta_soc > 1e-12:
                         charge_input = delta_soc / inputs.eta_charge
-
+                    
+                        # First priority: recover curtailed PV
                         recoverable_pv_to_batt = min(charge_input, pv_recoverable_t)
                         remaining_after_recoverable = charge_input - recoverable_pv_to_batt
-
+                    
+                        # Second priority: normal sellable PV
                         sellable_pv_to_batt = min(remaining_after_recoverable, pv_sellable_t)
                         remaining_after_sellable = remaining_after_recoverable - sellable_pv_to_batt
-
+                    
+                        # Last priority: grid
                         grid_charge = max(remaining_after_sellable, 0.0)
                         pv_direct_candidate = pv_sellable_t - sellable_pv_to_batt
-
+                    
+                        # Grid charging still subject to charge threshold
                         if grid_charge > 1e-9 and grid_buy_t > charge_threshold_series[t]:
                             continue
-
-                        # ONLY block if grid is used
+                    
+                        # Minimum spread must apply ONLY to the grid-charged portion
                         if grid_charge > 1e-9 and (batt_sell_t - grid_buy_t) < inputs.min_spread_arbitrage_eur_per_mwh:
                             continue
                     elif delta_soc < -1e-12:
