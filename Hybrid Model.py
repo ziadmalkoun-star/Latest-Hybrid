@@ -555,7 +555,7 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
             pv_price_t = pv_price[t]
             batt_sell_t = batt_sell[t]
             grid_buy_t = grid_buy[t]
-            is_grid_charge_hour = grid_buy_t <= charge_threshold_series[t]
+            is_grid_charge_hour = grid_buy_t <= charge_threshold_series[t] + 1e-9
             
             for i in range(soc_steps):
                 best_val = neg_inf
@@ -583,16 +583,6 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
 
                         grid_charge = max(remaining_after_sellable, 0.0)
                         pv_direct_candidate = pv_sellable_t - sellable_pv_to_batt
-
-                        if grid_charge > 1e-9 and grid_buy_t > charge_threshold_series[t]:
-                            continue
-
-                        # Force grid charging during cheap hours when battery has available capacity
-                        if is_grid_charge_hour and soc_i < inputs.batt_energy_mwh - 1e-9:
-                            if delta_soc <= 1e-12:
-                                continue
-                            if grid_charge <= 1e-9:
-                                continue
                                 
                     elif delta_soc < -1e-12:
                         discharge_candidate = (-delta_soc) * inputs.eta_discharge
@@ -602,7 +592,17 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
                                 continue
                             if batt_sell_t < estimate_gate[t]:
                                 continue
-
+                                
+                    # Force charging during cheap grid hours when battery has available capacity.
+                    # This blocks idle and discharge transitions during cheap charge hours.
+                    if is_grid_charge_hour and soc_i < inputs.batt_energy_mwh - 1e-9:
+                        if delta_soc <= 1e-12:
+                            continue
+                    
+                    # Grid charging is only allowed during cheap hours.
+                    if grid_charge > 1e-9 and not is_grid_charge_hour:
+                        continue
+                        
                     total_export = pv_direct_candidate + discharge_candidate
 
                     if total_export > inputs.grid_export_limit_mw:
