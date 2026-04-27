@@ -585,19 +585,26 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
                         pv_direct_candidate = pv_sellable_t - sellable_pv_to_batt
                                 
                     elif delta_soc < -1e-12:
-                        discharge_candidate = (-delta_soc) * inputs.eta_discharge
+                        tentative_discharge = (-delta_soc) * inputs.eta_discharge
+                    
+                        if stored_energy_mwh > 1e-9:
+                            avg_cost_now = stored_energy_value_eur / stored_energy_mwh
+                            required_price_now = avg_cost_now + inputs.min_spread_arbitrage_eur_per_mwh
+                        else:
+                            required_price_now = np.inf
+                    
+                        if batt_sell[t] < required_price_now:
+                            discharge[t] = 0.0
+                            soc[t + 1] = soc[t]
+                            delta_soc = 0.0
+                        else:
+                            discharge[t] = tentative_discharge
 
                         if discharge_candidate > 1e-9:
                             if batt_sell_t < discharge_threshold_series[t]:
                                 continue
                             if batt_sell_t < estimate_gate[t]:
                                 continue
-                                
-                    # Force charging during cheap grid hours when battery has available capacity.
-                    # This blocks idle and discharge transitions during cheap charge hours.
-                    if is_grid_charge_hour and soc_i < inputs.batt_energy_mwh - 1e-9:
-                        if delta_soc <= 1e-12:
-                            continue
                     
                     # Grid charging is only allowed during cheap hours.
                     if grid_charge > 1e-9 and not is_grid_charge_hour:
@@ -771,7 +778,7 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
 
     for _ in range(n_passes):
         candidate = run_dp_once(required_estimate)
-        new_estimate = np.nan_to_num(candidate["required_discharge_price"], nan=-1e30, posinf=1e30, neginf=-1e30)
+        new_estimate = np.nan_to_num(candidate["required_discharge_price"], nan=1e30, posinf=1e30, neginf=1e30)
 
         if final_result is not None and np.allclose(new_estimate, required_estimate, atol=1e-6, rtol=0.0):
             final_result = candidate
