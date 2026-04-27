@@ -2097,6 +2097,11 @@ def app():
             + battery_debug["pv_curtailed_to_battery_mwh"]
         )
 
+        battery_debug["spread_check"] = (
+            battery_debug["battery_sell_price_effective_eur_per_mwh"]
+            - battery_debug["grid_buy_price_effective_eur_per_mwh"]
+        )
+
         battery_debug["total_battery_discharge_mwh"] = (
             battery_debug["battery_discharge_mwh"]
             + battery_debug["afrr_discharge_mwh"]
