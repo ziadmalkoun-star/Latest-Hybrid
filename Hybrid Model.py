@@ -244,6 +244,9 @@ def read_bess_degradation_excel(uploaded_file, project_lifetime_years: int, init
     if len(degradation_pct) == 0:
         raise ValueError("La courbe de dégradation BESS est vide.")
 
+    if degradation_pct[0] <= 1.5:
+        degradation_pct = degradation_pct * 100.0
+    
     if not np.isclose(degradation_pct[0], 100.0, atol=1e-6):
         raise ValueError("La valeur de dégradation BESS en année 1 doit être égale à 100%.")
 
