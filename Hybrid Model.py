@@ -555,8 +555,7 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
             pv_price_t = pv_price[t]
             batt_sell_t = batt_sell[t]
             grid_buy_t = grid_buy[t]
-            is_grid_charge_hour = grid_buy_t <= charge_threshold_series[t] + 1e-9
-            
+
             for i in range(soc_steps):
                 best_val = neg_inf
                 best_j = -1
@@ -583,18 +582,22 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
 
                         grid_charge = max(remaining_after_sellable, 0.0)
                         pv_direct_candidate = pv_sellable_t - sellable_pv_to_batt
-                                
+
+                        if grid_charge > 1e-9 and grid_buy_t > charge_threshold_series[t]:
+                            continue
+
+                        if (recoverable_pv_to_batt + sellable_pv_to_batt) < charge_input and (batt_sell_t - grid_buy_t) < inputs.min_spread_arbitrage_eur_per_mwh:
+                            continue
+
                     elif delta_soc < -1e-12:
                         discharge_candidate = (-delta_soc) * inputs.eta_discharge
-                    
+
                         if discharge_candidate > 1e-9:
+                            if batt_sell_t < discharge_threshold_series[t]:
+                                continue
                             if batt_sell_t < estimate_gate[t]:
                                 continue
-                    
-                    # Grid charging is only allowed during cheap hours.
-                    if grid_charge > 1e-9 and not is_grid_charge_hour:
-                        continue
-                        
+
                     total_export = pv_direct_candidate + discharge_candidate
 
                     if total_export > inputs.grid_export_limit_mw:
@@ -753,8 +756,6 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
             "required_discharge_price": required_discharge_price,
             "hourly_datetime": idx,
             "required_discharge_price_gate_estimate": estimate_gate,
-            "charge_threshold_series": charge_threshold_series,
-            "discharge_threshold_series": discharge_threshold_series,
         }
 
     n_passes = 3
@@ -763,7 +764,7 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
 
     for _ in range(n_passes):
         candidate = run_dp_once(required_estimate)
-        new_estimate = np.nan_to_num(candidate["required_discharge_price"], nan=1e30, posinf=1e30, neginf=1e30)
+        new_estimate = np.nan_to_num(candidate["required_discharge_price"], nan=-1e30, posinf=1e30, neginf=-1e30)
 
         if final_result is not None and np.allclose(new_estimate, required_estimate, atol=1e-6, rtol=0.0):
             final_result = candidate
@@ -1979,8 +1980,6 @@ def app():
             "battery_sell_price_effective_eur_per_mwh": batt_sell_curve_effective,
             "grid_buy_price_raw_eur_per_mwh": grid_buy_curve_raw,
             "grid_buy_price_effective_eur_per_mwh": grid_buy_curve_effective,
-            "charge_threshold_eur_per_mwh": final_result["charge_threshold_series"],
-            "discharge_threshold_eur_per_mwh": final_result["discharge_threshold_series"],
             "pv_direct_mwh": final_result["pv_direct"],
             "pv_to_battery_mwh": final_result["pv_to_batt"],
             "grid_charge_mwh": final_result["grid_charge"],
@@ -2153,8 +2152,6 @@ def app():
                 "wholesale_discharge_price_eur_per_mwh",
                 "avg_stored_charge_price_eur_per_mwh",
                 "required_discharge_price_eur_per_mwh",
-                "required_discharge_price_gate_estimate_eur_per_mwh",
-                "battery_sell_price_effective_eur_per_mwh",
                 "battery_sale_revenue_eur",
                 "grid_charge_cost_eur",
                 "afrr_charge_cost_eur",
