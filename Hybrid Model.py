@@ -1711,7 +1711,7 @@ def app():
 
             # Raw price curves
             if enable_cfd:
-            pv_price_curve_raw = _make_flat_curve(cfd_price_standalone)
+                pv_price_curve_raw = _make_flat_curve(cfd_price_standalone)
             elif enable_ppa:
                 pv_price_curve_raw = _make_flat_curve(ppa_price_standalone)
             else:
