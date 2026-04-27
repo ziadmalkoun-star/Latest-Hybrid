@@ -2161,6 +2161,7 @@ def app():
                 "wholesale_discharge_price_eur_per_mwh",
                 "avg_stored_charge_price_eur_per_mwh",
                 "required_discharge_price_eur_per_mwh",
+                "battery_sell_price_effective_eur_per_mwh"
                 "battery_sale_revenue_eur",
                 "grid_charge_cost_eur",
                 "afrr_charge_cost_eur",
