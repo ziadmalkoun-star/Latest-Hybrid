@@ -2083,6 +2083,81 @@ def app():
             use_container_width=True,
         )
 
+        st.subheader("Debug batterie - 5 premiers jours de juin")
+
+        battery_debug = hourly_df[
+            (hourly_df["datetime"] >= pd.Timestamp(f"{DEFAULT_YEAR}-06-01 00:00:00")) &
+            (hourly_df["datetime"] < pd.Timestamp(f"{DEFAULT_YEAR}-06-06 00:00:00"))
+        ].copy()
+
+        battery_debug["total_battery_charge_mwh"] = (
+            battery_debug["pv_to_battery_mwh"]
+            + battery_debug["grid_charge_mwh"]
+            + battery_debug["afrr_charge_mwh"]
+            + battery_debug["pv_curtailed_to_battery_mwh"]
+        )
+
+        battery_debug["total_battery_discharge_mwh"] = (
+            battery_debug["battery_discharge_mwh"]
+            + battery_debug["afrr_discharge_mwh"]
+        )
+
+        battery_debug["wholesale_charge_price_eur_per_mwh"] = np.where(
+            battery_debug["grid_charge_mwh"] > 1e-9,
+            battery_debug["grid_buy_price_effective_eur_per_mwh"],
+            np.where(
+                battery_debug["pv_to_battery_mwh"] > 1e-9,
+                battery_debug["pv_price_effective_eur_per_mwh"],
+                np.nan,
+            )
+        )
+
+        battery_debug["wholesale_discharge_price_eur_per_mwh"] = np.where(
+            battery_debug["battery_discharge_mwh"] > 1e-9,
+            battery_debug["battery_sell_price_effective_eur_per_mwh"],
+            np.nan,
+        )
+
+        battery_debug["battery_activity"] = np.select(
+            [
+                battery_debug["total_battery_charge_mwh"] > 1e-9,
+                battery_debug["total_battery_discharge_mwh"] > 1e-9,
+            ],
+            [
+                "Charging",
+                "Discharging",
+            ],
+            default="Idle",
+        )
+
+        st.dataframe(
+            battery_debug[[
+                "datetime",
+                "battery_activity",
+                "battery_soc_mwh_end",
+                "total_battery_charge_mwh",
+                "pv_to_battery_mwh",
+                "grid_charge_mwh",
+                "pv_curtailed_to_battery_mwh",
+                "afrr_charge_mwh",
+                "wholesale_charge_price_eur_per_mwh",
+                "total_battery_discharge_mwh",
+                "battery_discharge_mwh",
+                "afrr_discharge_mwh",
+                "wholesale_discharge_price_eur_per_mwh",
+                "avg_stored_charge_price_eur_per_mwh",
+                "required_discharge_price_eur_per_mwh",
+                "battery_sale_revenue_eur",
+                "grid_charge_cost_eur",
+                "afrr_charge_cost_eur",
+                "afrr_sale_revenue_eur",
+                "afrr_cycle_cost_eur",
+                "afrr_net_revenue_eur",
+            ]],
+            use_container_width=True,
+            hide_index=True,
+        )
+        
         c1, c2 = st.columns(2)
 
         with c1:
