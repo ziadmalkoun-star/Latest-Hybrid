@@ -1709,17 +1709,27 @@ def app():
                     "annual_losses_mwh": float(max(annual_dc - annual_net, 0.0)),
                 }
 
-            # Raw price curves
-            pv_price_curve_raw = None
-            if enable_cfd:
-                pv_price_curve_raw = _make_flat_curve(cfd_price_standalone)
-            elif enable_ppa:
-                pv_price_curve_raw = _make_flat_curve(ppa_price_standalone)
+        # Raw price curves
+        pv_price_curve_raw = None
+
+        if enable_cfd:
+            pv_price_curve_raw = _make_flat_curve(cfd_price_standalone)
+        elif enable_ppa:
+            pv_price_curve_raw = _make_flat_curve(ppa_price_standalone)
+        else:
+            if pv_price_mode == "Prix moyen annuel":
+                pv_price_curve_raw = _make_flat_curve(pv_price_value)
             else:
-                pv_price_curve_raw = _make_flat_curve(pv_price_value) if pv_price_mode == "Prix moyen annuel" else _read_single_column_csv(pv_price_upload)
-            if pv_price_curve_raw is None:
-                raise ValueError("pv_price_curve_raw was not properly initialized.")
-            batt_sell_curve_raw = _make_flat_curve(batt_sell_value) if batt_sell_mode == "Prix moyen annuel" else _read_single_column_csv(batt_sell_upload)
+                pv_price_curve_raw = _read_single_column_csv(pv_price_upload)
+
+        if pv_price_curve_raw is None:
+            raise ValueError("pv_price_curve_raw was not properly initialized.")
+
+        batt_sell_curve_raw = (
+            _make_flat_curve(batt_sell_value)
+            if batt_sell_mode == "Prix moyen annuel"
+            else _read_single_column_csv(batt_sell_upload)
+        )
 
         if grid_mode == "Identique au prix vente batterie":
             grid_buy_curve_raw = batt_sell_curve_raw.copy()
