@@ -585,24 +585,9 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
                         pv_direct_candidate = pv_sellable_t - sellable_pv_to_batt
                                 
                     elif delta_soc < -1e-12:
-                        tentative_discharge = (-delta_soc) * inputs.eta_discharge
+                        discharge_candidate = (-delta_soc) * inputs.eta_discharge
                     
-                        if stored_energy_mwh > 1e-9:
-                            avg_cost_now = stored_energy_value_eur / stored_energy_mwh
-                            required_price_now = avg_cost_now + inputs.min_spread_arbitrage_eur_per_mwh
-                        else:
-                            required_price_now = np.inf
-                    
-                        if batt_sell[t] < required_price_now:
-                            discharge[t] = 0.0
-                            soc[t + 1] = soc[t]
-                            delta_soc = 0.0
-                        else:
-                            discharge[t] = tentative_discharge
-
                         if discharge_candidate > 1e-9:
-                            if batt_sell_t < discharge_threshold_series[t]:
-                                continue
                             if batt_sell_t < estimate_gate[t]:
                                 continue
                     
