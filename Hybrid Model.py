@@ -555,7 +555,8 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
             pv_price_t = pv_price[t]
             batt_sell_t = batt_sell[t]
             grid_buy_t = grid_buy[t]
-
+            is_grid_charge_hour = grid_buy_t <= charge_threshold_series[t]
+            
             for i in range(soc_steps):
                 best_val = neg_inf
                 best_j = -1
@@ -586,6 +587,13 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
                         if grid_charge > 1e-9 and grid_buy_t > charge_threshold_series[t]:
                             continue
 
+                        # Force grid charging during cheap hours when battery has available capacity
+                        if is_grid_charge_hour and soc_i < inputs.batt_energy_mwh - 1e-9:
+                            if delta_soc <= 1e-12:
+                                continue
+                            if grid_charge <= 1e-9:
+                                continue
+                                
                     elif delta_soc < -1e-12:
                         discharge_candidate = (-delta_soc) * inputs.eta_discharge
 
@@ -753,6 +761,8 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
             "required_discharge_price": required_discharge_price,
             "hourly_datetime": idx,
             "required_discharge_price_gate_estimate": estimate_gate,
+            "charge_threshold_series": charge_threshold_series,
+            "discharge_threshold_series": discharge_threshold_series,
         }
 
     n_passes = 3
@@ -1977,6 +1987,8 @@ def app():
             "battery_sell_price_effective_eur_per_mwh": batt_sell_curve_effective,
             "grid_buy_price_raw_eur_per_mwh": grid_buy_curve_raw,
             "grid_buy_price_effective_eur_per_mwh": grid_buy_curve_effective,
+            "charge_threshold_eur_per_mwh": final_result["charge_threshold_series"],
+            "discharge_threshold_eur_per_mwh": final_result["discharge_threshold_series"],
             "pv_direct_mwh": final_result["pv_direct"],
             "pv_to_battery_mwh": final_result["pv_to_batt"],
             "grid_charge_mwh": final_result["grid_charge"],
