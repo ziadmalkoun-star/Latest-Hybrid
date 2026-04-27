@@ -76,7 +76,13 @@ class SimulationInputs:
     consecutive_negative_hours_limit: int = 6
     ppa_price_eur_per_mwh: float = 0.0
     charge_battery_if_curtailment: bool = False
-
+    enable_cfd: bool = False
+    cfd_price_standalone_eur_per_mwh: float = 0.0
+    enable_ppa: bool = False
+    ppa_price_standalone_eur_per_mwh: float = 0.0
+    project_lifetime_years: int = 1
+    bess_degradation_curve_pct: np.ndarray | None = None
+    degraded_bess_energy_by_year_mwh: np.ndarray | None = None
 
 def _validate_array_length(arr: np.ndarray, name: str, expected_len: int = HOURS_PER_YEAR) -> np.ndarray:
     arr = np.asarray(arr, dtype=float).reshape(-1)
@@ -215,6 +221,46 @@ def read_monthly_curtailment_excel(uploaded_file) -> np.ndarray:
 
     return values
 
+def read_bess_degradation_excel(uploaded_file, project_lifetime_years: int, initial_bess_mwh: float) -> Tuple[np.ndarray, np.ndarray, pd.DataFrame]:
+    if uploaded_file is None:
+        degradation_pct = np.full(project_lifetime_years, 100.0, dtype=float)
+    else:
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
+
+        df = pd.read_excel(uploaded_file, header=None)
+        degradation_pct = pd.to_numeric(df.iloc[:, 0], errors="coerce").dropna().to_numpy(dtype=float)
+
+        if len(degradation_pct) < project_lifetime_years:
+            raise ValueError(
+                f"La courbe de dégradation BESS doit contenir au moins {project_lifetime_years} valeurs. "
+                f"Reçu: {len(degradation_pct)}."
+            )
+
+        degradation_pct = degradation_pct[:project_lifetime_years]
+
+    if len(degradation_pct) == 0:
+        raise ValueError("La courbe de dégradation BESS est vide.")
+
+    if not np.isclose(degradation_pct[0], 100.0, atol=1e-6):
+        raise ValueError("La valeur de dégradation BESS en année 1 doit être égale à 100%.")
+
+    degraded_mwh = np.zeros(project_lifetime_years, dtype=float)
+    degraded_mwh[0] = float(initial_bess_mwh)
+
+    for y in range(1, project_lifetime_years):
+        degraded_mwh[y] = degraded_mwh[y - 1] * degradation_pct[y] / 100.0
+
+    degradation_df = pd.DataFrame({
+        "Year": np.arange(1, project_lifetime_years + 1),
+        "Degradation_pct": degradation_pct,
+        "BESS_energy_mwh": degraded_mwh,
+    })
+
+    return degradation_pct, degraded_mwh, degradation_df
+    
 
 def _make_flat_curve(value: float, expected_len: int = HOURS_PER_YEAR) -> np.ndarray:
     if value is None:
@@ -1390,6 +1436,13 @@ def build_inputs_dataframe(inputs: SimulationInputs) -> pd.DataFrame:
         ("consecutive_negative_hours_limit", inputs.consecutive_negative_hours_limit),
         ("ppa_price_eur_per_mwh", inputs.ppa_price_eur_per_mwh),
         ("charge_battery_if_curtailment", inputs.charge_battery_if_curtailment),
+        ("enable_cfd", inputs.enable_cfd),
+        ("cfd_price_standalone_eur_per_mwh", inputs.cfd_price_standalone_eur_per_mwh),
+        ("enable_ppa", inputs.enable_ppa),
+        ("ppa_price_standalone_eur_per_mwh", inputs.ppa_price_standalone_eur_per_mwh),
+        ("bess_degradation_curve_pct", "" if inputs.bess_degradation_curve_pct is None else list(inputs.bess_degradation_curve_pct)),
+        ("degraded_bess_energy_by_year_mwh", "" if inputs.degraded_bess_energy_by_year_mwh is None else list(inputs.degraded_bess_energy_by_year_mwh)),
+        ("project_lifetime_years", inputs.project_lifetime_years),
     ]
     return pd.DataFrame(rows, columns=["Parameter", "Value"])
 
@@ -1401,6 +1454,7 @@ def to_excel_bytes(
     hourly_df: pd.DataFrame,
     afrr_qh_df: pd.DataFrame | None = None,
     afrr_daily_log_df: pd.DataFrame | None = None,
+    bess_degradation_df: pd.DataFrame | None = None,
 ) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -1414,6 +1468,9 @@ def to_excel_bytes(
 
         if afrr_daily_log_df is not None:
             afrr_daily_log_df.to_excel(writer, sheet_name="aFRR_Daily_Log", index=False)
+
+        if bess_degradation_df is not None:
+            bess_degradation_df.to_excel(writer, sheet_name="BESS_Degradation", index=False)
 
     return output.getvalue()
 
@@ -1541,7 +1598,33 @@ def app():
 
     with cur3:
         charge_battery_if_curtailment = st.radio("Charge Battery if Curtailment", ["No", "Yes"], horizontal=True) == "Yes"
+        
+    st.subheader("Contrats PV et durée projet")
 
+    contract_col1, contract_col2, contract_col3 = st.columns(3)
+
+    with contract_col1:
+        enable_cfd = st.radio("CfD", ["No", "Yes"], horizontal=True) == "Yes"
+        cfd_price_standalone = 0.0
+        if enable_cfd:
+            cfd_price_standalone = st.number_input("CfD Price (€/MWh)", value=50.0, step=1.0)
+
+    with contract_col2:
+        enable_ppa = st.radio("PPA", ["No", "Yes"], horizontal=True) == "Yes"
+        ppa_price_standalone = 0.0
+        if enable_ppa:
+            ppa_price_standalone = st.number_input("PPA Price (€/MWh)", value=50.0, step=1.0)
+
+    with contract_col3:
+        project_lifetime_years = int(
+            st.number_input("Project Lifetime", min_value=1, value=1, step=1)
+        )
+        bess_degradation_upload = st.file_uploader(
+            "BESS Degradation Curve",
+            type=["xlsx", "xls"],
+            key="bess_degradation_curve",
+        )
+        
     st.subheader("aFRR énergie (quart-horaire)")
     enable_afrr = st.checkbox("Activer l'arbitrage aFRR de nuit", value=False)
 
@@ -1586,7 +1669,20 @@ def app():
         if final_soc > batt_energy_mwh:
             st.error("Le SOC final ne peut pas dépasser la capacité batterie.")
             return
+        if enable_cfd and enable_ppa:
+            st.error("CfD et PPA ne peuvent pas être activés en même temps.")
+            return
 
+        try:
+            bess_degradation_curve_pct, degraded_bess_energy_by_year_mwh, bess_degradation_df = read_bess_degradation_excel(
+                bess_degradation_upload,
+                project_lifetime_years,
+                batt_energy_mwh,
+            )
+        except Exception as e:
+            st.error(f"Erreur courbe de dégradation BESS: {e}")
+            return
+            
         # Base PV
         if solar_mode == "Courbe standard France":
             solar_relative = build_standard_france_solar_profile()
@@ -1613,9 +1709,14 @@ def app():
                     "annual_losses_mwh": float(max(annual_dc - annual_net, 0.0)),
                 }
 
-        # Raw price curves
-        pv_price_curve_raw = _make_flat_curve(pv_price_value) if pv_price_mode == "Prix moyen annuel" else _read_single_column_csv(pv_price_upload)
-        batt_sell_curve_raw = _make_flat_curve(batt_sell_value) if batt_sell_mode == "Prix moyen annuel" else _read_single_column_csv(batt_sell_upload)
+            # Raw price curves
+            if enable_cfd:
+            pv_price_curve_raw = _make_flat_curve(cfd_price_standalone)
+            elif enable_ppa:
+                pv_price_curve_raw = _make_flat_curve(ppa_price_standalone)
+            else:
+                pv_price_curve_raw = _make_flat_curve(pv_price_value) if pv_price_mode == "Prix moyen annuel" else _read_single_column_csv(pv_price_upload)
+            batt_sell_curve_raw = _make_flat_curve(batt_sell_value) if batt_sell_mode == "Prix moyen annuel" else _read_single_column_csv(batt_sell_upload)
 
         if grid_mode == "Identique au prix vente batterie":
             grid_buy_curve_raw = batt_sell_curve_raw.copy()
@@ -1677,6 +1778,9 @@ def app():
             ppa_price_eur_per_mwh=ppa_price,
         )
 
+        if enable_cfd or enable_ppa:
+            self_out["pv_effective_price_eur_per_mwh"] = pv_spot_price_effective.copy()
+            
         # Curtailment pipeline
         pv_after_tso_dso = tso_out["pv_after_tso_dso_mwh"]
         pv_after_self = self_out["pv_after_self_curtailment_mwh"]
@@ -1743,6 +1847,13 @@ def app():
             consecutive_negative_hours_limit=consecutive_negative_hours_limit,
             ppa_price_eur_per_mwh=ppa_price,
             charge_battery_if_curtailment=charge_battery_if_curtailment,
+            enable_cfd=enable_cfd,
+            cfd_price_standalone_eur_per_mwh=cfd_price_standalone,
+            enable_ppa=enable_ppa,
+            ppa_price_standalone_eur_per_mwh=ppa_price_standalone,
+            project_lifetime_years=project_lifetime_years,
+            bess_degradation_curve_pct=bess_degradation_curve_pct,
+            degraded_bess_energy_by_year_mwh=degraded_bess_energy_by_year_mwh,
         )
 
         inputs_df = build_inputs_dataframe(sim_inputs)
@@ -1906,6 +2017,7 @@ def app():
             hourly_df=hourly_df,
             afrr_qh_df=afrr_qh_df,
             afrr_daily_log_df=afrr_result["afrr_daily_log"] if afrr_result is not None else None,
+            bess_degradation_df=bess_degradation_df,
         )
 
         end_time = time.time()
@@ -2166,8 +2278,16 @@ def app():
 
             lines_1, labels_1 = ax1.get_legend_handles_labels()
             lines_2, labels_2 = ax2.get_legend_handles_labels()
-            ax1.legend(lines_1 + lines_2, labels_1 + labels_2, loc="upper right")
+            ax1.legend(
+                lines_1 + lines_2,
+                labels_1 + labels_2,
+                loc="upper center",
+                bbox_to_anchor=(0.5, -0.18),
+                ncol=3,
+                frameon=False,
+            )
             ax1.set_title("Dispatch énergétique - 5 premiers jours de juin")
+            fig.tight_layout(rect=[0, 0.12, 1, 1])
 
             st.pyplot(fig)
             plt.close(fig)
