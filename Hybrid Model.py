@@ -2036,7 +2036,14 @@ def app():
         )
 
         monthly_df = monthly_dataframe(final_result, pure_pv_benchmark, pv_dc_mw, batt_power_mw, curtailment_outputs)
-
+        
+        if enable_cfd:
+            monthly_df["pv_only_cfd_revenue"] = (
+                monthly_df["pv_only_direct_mwh"] * cfd_price_standalone
+            )
+        else:
+            monthly_df["pv_only_cfd_revenue"] = np.nan
+            
         if pure_pv_cfd_benchmark is not None:
             cfd_monthly_df = pd.DataFrame({
                 "datetime": idx,
