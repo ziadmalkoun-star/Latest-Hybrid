@@ -1869,7 +1869,16 @@ def app():
             pv_price=pv_effective_price_for_revenue,
             grid_export_limit_mw=grid_export_limit_mw,
         )
+        pure_pv_cfd_benchmark = None
 
+        if enable_cfd:
+            pv_cfd_price_curve = _make_flat_curve(cfd_price_standalone)
+        
+            pure_pv_cfd_benchmark = build_pure_pv_benchmark(
+                pv_generation_mwh=pv_sellable_for_dispatch_mwh,
+                pv_price=pv_cfd_price_curve,
+                grid_export_limit_mw=grid_export_limit_mw,
+            )
         sim_inputs = SimulationInputs(
             batt_power_mw=batt_power_mw,
             batt_energy_mwh=batt_energy_mwh,
@@ -2027,6 +2036,28 @@ def app():
         )
 
         monthly_df = monthly_dataframe(final_result, pure_pv_benchmark, pv_dc_mw, batt_power_mw, curtailment_outputs)
+
+        if pure_pv_cfd_benchmark is not None:
+            cfd_monthly_df = pd.DataFrame({
+                "datetime": idx,
+                "pv_only_cfd_revenue": pure_pv_cfd_benchmark["pv_only_revenue_eur"],
+            })
+        
+            cfd_monthly_df["month"] = cfd_monthly_df["datetime"].dt.strftime("%Y-%m")
+        
+            cfd_monthly_df = (
+                cfd_monthly_df
+                .groupby("month", as_index=False)
+                .sum(numeric_only=True)
+            )
+        
+            monthly_df = monthly_df.merge(
+                cfd_monthly_df[["month", "pv_only_cfd_revenue"]],
+                on="month",
+                how="left",
+            )
+        else:
+            monthly_df["pv_only_cfd_revenue"] = np.nan
 
         idx = pd.date_range(f"{DEFAULT_YEAR}-01-01 00:00:00", periods=HOURS_PER_YEAR, freq="h")
         
@@ -2910,7 +2941,7 @@ def app():
 
             pv_only_monthly_keur = monthly_df["pv_only_revenue"].to_numpy(dtype=float) / 1000.0
             hybrid_monthly_keur = monthly_df["net_revenue"].to_numpy(dtype=float) / 1000.0
-
+            
             ax_cmp.plot(
                 x,
                 pv_only_monthly_keur,
@@ -2918,7 +2949,7 @@ def app():
                 linewidth=2.0,
                 label="PV-only"
             )
-
+            
             ax_cmp.plot(
                 x,
                 hybrid_monthly_keur,
@@ -2926,6 +2957,19 @@ def app():
                 linewidth=2.0,
                 label="Hybrid (PV + BESS)"
             )
+            
+            if enable_cfd and "pv_only_cfd_revenue" in monthly_df.columns:
+                pv_only_cfd_monthly_keur = (
+                    monthly_df["pv_only_cfd_revenue"].to_numpy(dtype=float) / 1000.0
+                )
+            
+                ax_cmp.plot(
+                    x,
+                    pv_only_cfd_monthly_keur,
+                    marker="o",
+                    linewidth=2.0,
+                    label="PV-only-CfD"
+                )
 
             ax_cmp.set_title("Comparaison Revenu PV-only vs Hybrid")
             ax_cmp.set_ylabel("kEUR")
