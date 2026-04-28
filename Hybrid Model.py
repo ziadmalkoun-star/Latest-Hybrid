@@ -102,11 +102,16 @@ def build_combined_soc_with_afrr(
 ) -> Dict[str, np.ndarray]:
 
     wholesale_pv_to_batt_h = np.asarray(result_hourly["pv_to_batt"], dtype=float)
+    wholesale_pv_curtailed_to_batt_h = np.asarray(
+        result_hourly.get("pv_curtailed_to_battery", np.zeros(HOURS_PER_YEAR)),
+        dtype=float,
+    )
     wholesale_grid_charge_h = np.asarray(result_hourly["grid_charge"], dtype=float)
     wholesale_discharge_h = np.asarray(result_hourly["discharge"], dtype=float)
 
     # Convert hourly → quarter-hour
     wholesale_pv_to_batt_qh = np.repeat(wholesale_pv_to_batt_h / 4.0, 4)
+    wholesale_pv_curtailed_to_batt_qh = np.repeat(wholesale_pv_curtailed_to_batt_h / 4.0, 4)
     wholesale_grid_charge_qh = np.repeat(wholesale_grid_charge_h / 4.0, 4)
     wholesale_discharge_market_qh = np.repeat(wholesale_discharge_h / 4.0, 4)
 
@@ -118,7 +123,11 @@ def build_combined_soc_with_afrr(
         afrr_discharge_market_qh = np.zeros(QH_PER_YEAR, dtype=float)
 
     # Convert to SOC flows
-    wholesale_charge_to_soc_qh = (wholesale_pv_to_batt_qh + wholesale_grid_charge_qh) * eta_charge
+    wholesale_charge_to_soc_qh = (
+        wholesale_pv_to_batt_qh
+        + wholesale_pv_curtailed_to_batt_qh
+        + wholesale_grid_charge_qh
+    ) * eta_charge
     wholesale_discharge_from_soc_qh = wholesale_discharge_market_qh / max(eta_discharge, 1e-12)
 
     afrr_charge_to_soc_qh = afrr_charge_market_qh * eta_charge
@@ -143,6 +152,7 @@ def build_combined_soc_with_afrr(
         "combined_charge_to_soc_qh": combined_charge_to_soc_qh,
         "combined_discharge_from_soc_qh": combined_discharge_from_soc_qh,
         "wholesale_charge_to_soc_qh": wholesale_charge_to_soc_qh,
+        "wholesale_pv_curtailed_to_batt_qh": wholesale_pv_curtailed_to_batt_qh,
         "wholesale_discharge_from_soc_qh": wholesale_discharge_from_soc_qh,
         "afrr_charge_to_soc_qh": afrr_charge_to_soc_qh,
         "afrr_discharge_from_soc_qh": afrr_discharge_from_soc_qh,
@@ -1109,8 +1119,21 @@ def reconcile_wholesale_afrr_dispatch_qh(
     idx_qh = build_quarter_hour_index(DEFAULT_YEAR)
 
     pv_direct_qh = np.repeat(np.asarray(result_hourly["pv_direct"], dtype=float) / QH_PER_HOUR, QH_PER_HOUR)
-    wholesale_pv_to_batt_qh = np.repeat(np.asarray(result_hourly["pv_to_batt"], dtype=float) / QH_PER_HOUR, QH_PER_HOUR)
-    wholesale_grid_charge_qh = np.repeat(np.asarray(result_hourly["grid_charge"], dtype=float) / QH_PER_HOUR, QH_PER_HOUR)
+
+    wholesale_pv_to_batt_qh = np.repeat(
+        np.asarray(result_hourly["pv_to_batt"], dtype=float) / QH_PER_HOUR,
+        QH_PER_HOUR,
+    )
+    
+    wholesale_pv_curtailed_to_batt_qh = np.repeat(
+        np.asarray(result_hourly.get("pv_curtailed_to_battery", np.zeros(HOURS_PER_YEAR)), dtype=float) / QH_PER_HOUR,
+        QH_PER_HOUR,
+    )
+    
+    wholesale_grid_charge_qh = np.repeat(
+        np.asarray(result_hourly["grid_charge"], dtype=float) / QH_PER_HOUR,
+        QH_PER_HOUR,
+    )
     wholesale_discharge_qh = np.repeat(np.asarray(result_hourly["discharge"], dtype=float) / QH_PER_HOUR, QH_PER_HOUR)
 
     batt_sell_price_qh = np.repeat(np.asarray(inputs.batt_sell_price, dtype=float), QH_PER_HOUR)
@@ -1158,6 +1181,7 @@ def reconcile_wholesale_afrr_dispatch_qh(
         total_selected_discharge_qh = corrected_wholesale_discharge_qh[t] + corrected_afrr_discharge_qh[t]
         if total_selected_discharge_qh > 1e-12:
             corrected_wholesale_pv_to_batt_qh[t] = 0.0
+            wholesale_pv_curtailed_to_batt_qh[t] = 0.0
             corrected_wholesale_grid_charge_qh[t] = 0.0
             corrected_afrr_charge_qh[t] = 0.0
 
@@ -1188,6 +1212,7 @@ def reconcile_wholesale_afrr_dispatch_qh(
 
     charge_to_soc_qh = (
         corrected_wholesale_pv_to_batt_qh
+        + wholesale_pv_curtailed_to_batt_qh
         + corrected_wholesale_grid_charge_qh
         + corrected_afrr_charge_qh
     ) * inputs.eta_charge
@@ -1213,6 +1238,8 @@ def reconcile_wholesale_afrr_dispatch_qh(
     return {
         "datetime_qh": idx_qh,
         "wholesale_pv_to_batt_qh_mwh": corrected_wholesale_pv_to_batt_qh,
+        "wholesale_pv_curtailed_to_batt_qh_mwh": wholesale_pv_curtailed_to_batt_qh,
+        "wholesale_pv_curtailed_to_batt_hourly_mwh": reshape_sum(wholesale_pv_curtailed_to_batt_qh),
         "wholesale_grid_charge_qh_mwh": corrected_wholesale_grid_charge_qh,
         "wholesale_discharge_qh_mwh": corrected_wholesale_discharge_qh,
         "wholesale_batt_sale_revenue_qh_eur": corrected_wholesale_batt_sale_revenue_qh,
@@ -1935,7 +1962,12 @@ def app():
                 "datetime": reconciliation["datetime_qh"],
                 "combined_charge_to_soc_qh_mwh": reconciliation["combined_charge_to_soc_qh_mwh"],
                 "combined_discharge_from_soc_qh_mwh": reconciliation["combined_discharge_from_soc_qh_mwh"],
-                "wholesale_charge_to_soc_qh_mwh": (reconciliation["wholesale_pv_to_batt_qh_mwh"] + reconciliation["wholesale_grid_charge_qh_mwh"]) * sim_inputs.eta_charge,
+                "wholesale_charge_to_soc_qh_mwh": (
+                    reconciliation["wholesale_pv_to_batt_qh_mwh"]
+                    + reconciliation["wholesale_pv_curtailed_to_batt_qh_mwh"]
+                    + reconciliation["wholesale_grid_charge_qh_mwh"]
+                ) * sim_inputs.eta_charge,
+                "wholesale_pv_curtailed_to_batt_qh_mwh": reconciliation["wholesale_pv_curtailed_to_batt_qh_mwh"],
                 "wholesale_discharge_from_soc_qh_mwh": reconciliation["wholesale_discharge_qh_mwh"] / max(sim_inputs.eta_discharge, 1e-12),
                 "afrr_charge_to_soc_qh_mwh": reconciliation["afrr_charge_qh_mwh"] * sim_inputs.eta_charge,
                 "afrr_discharge_from_soc_qh_mwh": reconciliation["afrr_discharge_qh_mwh"] / max(sim_inputs.eta_discharge, 1e-12),
@@ -1961,6 +1993,7 @@ def app():
                 "combined_charge_to_soc_qh_mwh": combined_soc_result["combined_charge_to_soc_qh"],
                 "combined_discharge_from_soc_qh_mwh": combined_soc_result["combined_discharge_from_soc_qh"],
                 "wholesale_charge_to_soc_qh_mwh": combined_soc_result["wholesale_charge_to_soc_qh"],
+                "wholesale_pv_curtailed_to_batt_qh_mwh": combined_soc_result["wholesale_pv_curtailed_to_batt_qh"],
                 "wholesale_discharge_from_soc_qh_mwh": combined_soc_result["wholesale_discharge_from_soc_qh"],
                 "afrr_charge_to_soc_qh_mwh": combined_soc_result["afrr_charge_to_soc_qh"],
                 "afrr_discharge_from_soc_qh_mwh": combined_soc_result["afrr_discharge_from_soc_qh"],
