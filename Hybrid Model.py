@@ -1930,10 +1930,27 @@ def app():
         with st.spinner("Optimisation économique annuelle en cours..."):
             result = optimize_dispatch_dp(sim_inputs)
 
-        # Actual recovered curtailed PV = what the DP used from recoverable stream
-        pv_curtailed_to_battery_actual = result["pv_curtailed_to_battery"]
-        pv_curtailed_residual_lost_mwh = np.maximum(pv_curtailment_candidate_mwh - pv_curtailed_to_battery_actual, 0.0)
+        afrr_result = None
+        reconciliation = None
+        final_result = result
 
+        if sim_inputs.enable_afrr:
+            with st.spinner("Simulation aFRR quart-horaire de nuit en cours..."):
+                afrr_result = simulate_afrr_night_arbitrage(sim_inputs, result)
+                reconciliation = reconcile_wholesale_afrr_dispatch_qh(result_hourly=result, afrr_result=afrr_result, inputs=sim_inputs)
+                final_result = build_final_result_after_market_arbitration(base_result=result, reconciliation=reconciliation, inputs=sim_inputs)
+
+        # Recompute actual curtailed PV recovered AFTER final dispatch/reconciliation
+        pv_curtailed_to_battery_actual = final_result.get(
+            "pv_curtailed_to_battery",
+            result["pv_curtailed_to_battery"],
+        )
+        
+        pv_curtailed_residual_lost_mwh = np.maximum(
+            pv_curtailment_candidate_mwh - pv_curtailed_to_battery_actual,
+            0.0,
+        )
+        
         curtailment_outputs = {
             "base_pv_generation_mwh": base_pv_hourly_mwh,
             "pv_after_tso_dso_curtailment_mwh": pv_after_tso_dso,
@@ -1949,16 +1966,6 @@ def app():
             "self_curtailment_reason": self_out["self_curtailment_reason"],
             "pv_commercial_structure_hourly": self_out["pv_commercial_structure_hourly"],
         }
-
-        afrr_result = None
-        reconciliation = None
-        final_result = result
-
-        if sim_inputs.enable_afrr:
-            with st.spinner("Simulation aFRR quart-horaire de nuit en cours..."):
-                afrr_result = simulate_afrr_night_arbitrage(sim_inputs, result)
-                reconciliation = reconcile_wholesale_afrr_dispatch_qh(result_hourly=result, afrr_result=afrr_result, inputs=sim_inputs)
-                final_result = build_final_result_after_market_arbitration(base_result=result, reconciliation=reconciliation, inputs=sim_inputs)
 
         if reconciliation is not None:
             combined_qh_df = pd.DataFrame({
