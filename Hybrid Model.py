@@ -2036,7 +2036,7 @@ def app():
         else:
             hourly_charge_to_soc = (
                 final_result["pv_to_batt"]
-                + final_result.get("pv_curtailed_to_battery", np.zeros(HOURS_PER_YEAR))
+                + pv_curtailed_to_battery_actual
                 + final_result["grid_charge"]
             ) * sim_inputs.eta_charge
         
