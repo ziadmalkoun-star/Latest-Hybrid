@@ -2003,6 +2003,27 @@ def app():
             "pv_capture_rate_pct": np.full(HOURS_PER_YEAR, pv_capture_rate_pct),
             "bess_capture_rate_pct": np.full(HOURS_PER_YEAR, bess_capture_rate_pct),
         })
+        
+        # === DEBUG: low-price discharges ===
+        low_price_discharges = hourly_df[
+            (hourly_df["battery_discharge_mwh"] > 1e-6) &
+            (
+                hourly_df["battery_sell_price_effective_eur_per_mwh"]
+                < hourly_df["required_discharge_price_eur_per_mwh"]
+            )
+        ].copy()
+        
+        st.subheader("Low price discharges (below required price)")
+        st.dataframe(
+            low_price_discharges[[
+                "datetime",
+                "battery_discharge_mwh",
+                "battery_sell_price_effective_eur_per_mwh",
+                "required_discharge_price_eur_per_mwh",
+                "avg_stored_charge_price_eur_per_mwh",
+            ]],
+            use_container_width=True
+        )
 
         afrr_qh_df = None
         if reconciliation is not None:
