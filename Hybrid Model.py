@@ -600,9 +600,6 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
                                 continue
                             if batt_sell_t < estimate_gate[t]:
                                 continue
-                            if np.isfinite(required_discharge_price_estimate[t]):
-                                if batt_sell_t < required_discharge_price_estimate[t]:
-                                    continue
 
                     total_export = pv_direct_candidate + discharge_candidate
 
@@ -764,21 +761,44 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
             "required_discharge_price_gate_estimate": estimate_gate,
         }
 
-    n_passes = 3
+    max_passes = 20
     required_estimate = np.full(T, -1e30, dtype=float)
     final_result = None
-
-    for _ in range(n_passes):
+    
+    for _ in range(max_passes):
         candidate = run_dp_once(required_estimate)
-        new_estimate = np.nan_to_num(candidate["required_discharge_price"], nan=-1e30, posinf=1e30, neginf=-1e30)
-
-        if final_result is not None and np.allclose(new_estimate, required_estimate, atol=1e-6, rtol=0.0):
-            final_result = candidate
-            break
-
+    
+        new_estimate = np.nan_to_num(
+            candidate["required_discharge_price"],
+            nan=-1e30,
+            posinf=1e30,
+            neginf=-1e30,
+        )
+    
+        # Important: only tighten the gate, never loosen it
+        tightened_estimate = np.maximum(required_estimate, new_estimate)
+    
+        discharge_mask = candidate["discharge"] > 1e-6
+        valid_required_mask = np.isfinite(candidate["required_discharge_price"])
+    
+        violations = (
+            discharge_mask
+            & valid_required_mask
+            & (batt_sell < candidate["required_discharge_price"] - 1e-9)
+        )
+    
         final_result = candidate
-        required_estimate = new_estimate.copy()
-
+    
+        if not violations.any() and np.allclose(
+            tightened_estimate,
+            required_estimate,
+            atol=1e-6,
+            rtol=0.0,
+        ):
+            break
+    
+        required_estimate = tightened_estimate.copy()
+    
     return final_result
 
 
