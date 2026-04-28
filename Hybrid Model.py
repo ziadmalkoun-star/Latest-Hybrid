@@ -600,6 +600,9 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
                                 continue
                             if batt_sell_t < estimate_gate[t]:
                                 continue
+                            if np.isfinite(required_discharge_price_estimate[t]):
+                                if batt_sell_t < required_discharge_price_estimate[t]:
+                                    continue
 
                     total_export = pv_direct_candidate + discharge_candidate
 
