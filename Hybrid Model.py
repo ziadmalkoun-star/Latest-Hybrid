@@ -2029,42 +2029,37 @@ def app():
         monthly_df = monthly_dataframe(final_result, pure_pv_benchmark, pv_dc_mw, batt_power_mw, curtailment_outputs)
 
         idx = pd.date_range(f"{DEFAULT_YEAR}-01-01 00:00:00", periods=HOURS_PER_YEAR, freq="h")
+        
         # === FIX SOC to include curtailed PV ===
-        hourly_charge_to_soc = (
-            final_result["pv_to_batt"]
-            + final_result.get("pv_curtailed_to_battery", result["pv_curtailed_to_battery"])
-            + final_result["grid_charge"]
-            + (
-                final_result["afrr_charge_hourly_mwh"]
-                if "afrr_charge_hourly_mwh" in final_result
-                else np.zeros(HOURS_PER_YEAR)
-            )
-        ) * sim_inputs.eta_charge
+        if reconciliation is not None:
+            combined_soc_hourly_end = reconciliation["combined_soc_hourly_end_mwh"]
+        else:
+            hourly_charge_to_soc = (
+                final_result["pv_to_batt"]
+                + final_result.get("pv_curtailed_to_battery", np.zeros(HOURS_PER_YEAR))
+                + final_result["grid_charge"]
+            ) * sim_inputs.eta_charge
         
-        hourly_discharge_from_soc = (
-            final_result["discharge"]
-            + (
-                final_result["afrr_discharge_hourly_mwh"]
-                if "afrr_discharge_hourly_mwh" in final_result
-                else np.zeros(HOURS_PER_YEAR)
-            )
-        ) / max(sim_inputs.eta_discharge, 1e-12)
+            hourly_discharge_from_soc = (
+                final_result["discharge"]
+            ) / max(sim_inputs.eta_discharge, 1e-12)
         
-        soc_hourly = np.zeros(HOURS_PER_YEAR + 1)
-        soc_hourly[0] = sim_inputs.initial_soc_mwh
+            soc_hourly = np.zeros(HOURS_PER_YEAR + 1)
+            soc_hourly[0] = sim_inputs.initial_soc_mwh
         
-        for t in range(HOURS_PER_YEAR):
-            soc_hourly[t + 1] = min(
-                max(
-                    soc_hourly[t]
-                    + hourly_charge_to_soc[t]
-                    - hourly_discharge_from_soc[t],
-                    0.0
-                ),
-                sim_inputs.batt_energy_mwh,
-            )
+            for t in range(HOURS_PER_YEAR):
+                soc_hourly[t + 1] = min(
+                    max(
+                        soc_hourly[t]
+                        + hourly_charge_to_soc[t]
+                        - hourly_discharge_from_soc[t],
+                        0.0,
+                    ),
+                    sim_inputs.batt_energy_mwh,
+                )
         
-        combined_soc_hourly_end = soc_hourly[1:]
+            combined_soc_hourly_end = soc_hourly[1:]
+            
         hourly_df = pd.DataFrame({
             "datetime": idx,
             "base_pv_generation_mwh": base_pv_hourly_mwh,
