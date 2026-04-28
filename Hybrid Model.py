@@ -761,7 +761,7 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
             "required_discharge_price_gate_estimate": estimate_gate,
         }
 
-    max_passes = 8
+    max_passes = 5
     required_estimate = np.full(T, -1e30, dtype=float)
     final_result = None
     
