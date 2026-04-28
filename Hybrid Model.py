@@ -2100,7 +2100,19 @@ def app():
             "pv_capture_rate_pct": np.full(HOURS_PER_YEAR, pv_capture_rate_pct),
             "bess_capture_rate_pct": np.full(HOURS_PER_YEAR, bess_capture_rate_pct),
         })
-        
+        hourly_df["soc_expected_from_flows"] = (
+            hourly_df["battery_soc_mwh_end"].shift(1).fillna(sim_inputs.initial_soc_mwh)
+            + (
+                hourly_df["pv_to_battery_mwh"]
+                + hourly_df["pv_curtailed_to_battery_mwh"]
+                + hourly_df["grid_charge_mwh"]
+                + hourly_df["afrr_charge_mwh"]
+            ) * sim_inputs.eta_charge
+            - (
+                hourly_df["battery_discharge_mwh"]
+                + hourly_df["afrr_discharge_mwh"]
+            ) / sim_inputs.eta_discharge
+        )
         # === DEBUG: low-price discharges ===
         low_price_discharges = hourly_df[
             (hourly_df["battery_discharge_mwh"] > 1e-6) &
