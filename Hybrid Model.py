@@ -2548,29 +2548,6 @@ def app():
                 alpha=0.7,
                 label="Prix spot PV effectif"
             )
-            ax2.plot(
-                df_plot["datetime"],
-                df_plot["battery_sell_price_effective_eur_per_mwh"],
-                linestyle="-.",
-                alpha=0.8,
-                label="Prix vente batterie effectif"
-            )
-            
-            ax2.plot(
-                df_plot["datetime"],
-                df_plot["required_discharge_price_eur_per_mwh"],
-                linestyle=":",
-                alpha=0.9,
-                label="Prix requis décharge"
-            )
-            
-            ax2.plot(
-                df_plot["datetime"],
-                df_plot["required_discharge_price_gate_estimate_eur_per_mwh"],
-                linestyle="-",
-                alpha=0.5,
-                label="Estimate gate"
-            )
             ax2.set_ylabel("Prix (EUR/MWh)")
             
             lines_1, labels_1 = ax1.get_legend_handles_labels()
