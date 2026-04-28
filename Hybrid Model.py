@@ -2388,6 +2388,141 @@ def app():
             st.pyplot(fig)
             plt.close(fig)
 
+            st.subheader("Dispatch énergétique - 5 derniers jours de mai + 5 premiers jours de juin")
+
+            start_date = pd.Timestamp(f"{DEFAULT_YEAR}-05-27 00:00:00")
+            end_date = pd.Timestamp(f"{DEFAULT_YEAR}-06-06 00:00:00")
+            
+            df_plot = hourly_df[
+                (hourly_df["datetime"] >= start_date) &
+                (hourly_df["datetime"] < end_date)
+            ].copy()
+            
+            fig, ax1 = plt.subplots(figsize=(14, 5))
+            bar_width = 0.03
+            
+            ax1.fill_between(
+                df_plot["datetime"],
+                df_plot["pv_direct_mwh"],
+                color="orange",
+                alpha=0.5,
+                label="PV → Réseau"
+            )
+            ax1.plot(
+                df_plot["datetime"],
+                df_plot["pv_direct_mwh"],
+                color="orange",
+                linewidth=1.8
+            )
+            
+            ax1.bar(
+                df_plot["datetime"],
+                df_plot["battery_discharge_mwh"],
+                width=bar_width,
+                label="Batterie → Réseau (wholesale)",
+                alpha=0.8,
+                color="green"
+            )
+            
+            ax1.bar(
+                df_plot["datetime"],
+                -df_plot["pv_to_battery_mwh"],
+                width=bar_width,
+                label="PV → Batterie",
+                alpha=0.6,
+                color="red"
+            )
+            
+            ax1.bar(
+                df_plot["datetime"],
+                -df_plot["grid_charge_mwh"],
+                width=bar_width,
+                bottom=-df_plot["pv_to_battery_mwh"],
+                label="Réseau → Batterie",
+                alpha=0.6
+            )
+            
+            if "afrr_discharge_mwh" in df_plot.columns:
+                ax1.bar(
+                    df_plot["datetime"],
+                    df_plot["afrr_discharge_mwh"],
+                    width=bar_width,
+                    label="aFRR → Décharge",
+                    alpha=0.5,
+                    color="purple"
+                )
+            
+            if "afrr_charge_mwh" in df_plot.columns:
+                ax1.bar(
+                    df_plot["datetime"],
+                    -df_plot["afrr_charge_mwh"],
+                    width=bar_width,
+                    label="aFRR → Charge",
+                    alpha=0.5,
+                    color="blue"
+                )
+            
+            if "pv_curtailment_candidate_mwh" in df_plot.columns:
+                ax1.plot(
+                    df_plot["datetime"],
+                    df_plot["pv_curtailment_candidate_mwh"],
+                    linestyle="--",
+                    linewidth=1.5,
+                    label="PV curtailed"
+                )
+            
+            if "pv_curtailed_to_battery_mwh" in df_plot.columns:
+                ax1.bar(
+                    df_plot["datetime"],
+                    -df_plot["pv_curtailed_to_battery_mwh"],
+                    width=bar_width,
+                    label="PV curtailed → battery",
+                    alpha=0.6
+                )
+            
+            if "pv_curtailed_residual_lost_mwh" in df_plot.columns:
+                ax1.plot(
+                    df_plot["datetime"],
+                    df_plot["pv_curtailed_residual_lost_mwh"],
+                    linestyle=":",
+                    linewidth=1.8,
+                    label="PV curtailed lost"
+                )
+            
+            ax1.axhline(0, linewidth=1)
+            ax1.set_ylabel("Flux énergie (MWh)")
+            ax1.set_xlabel("Heure")
+            ax1.xaxis.set_major_locator(mdates.DayLocator(interval=1))
+            ax1.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m"))
+            ax1.tick_params(axis="x", rotation=45)
+            
+            ax2 = ax1.twinx()
+            ax2.plot(
+                df_plot["datetime"],
+                df_plot["pv_price_effective_eur_per_mwh"],
+                linestyle="--",
+                alpha=0.7,
+                label="Prix spot PV effectif"
+            )
+            ax2.set_ylabel("Prix (EUR/MWh)")
+            
+            lines_1, labels_1 = ax1.get_legend_handles_labels()
+            lines_2, labels_2 = ax2.get_legend_handles_labels()
+            ax1.legend(
+                lines_1 + lines_2,
+                labels_1 + labels_2,
+                loc="upper center",
+                bbox_to_anchor=(0.5, -0.18),
+                ncol=3,
+                frameon=False,
+            )
+            
+            ax1.set_title("Dispatch énergétique - 5 derniers jours de mai + 5 premiers jours de juin")
+            fig.tight_layout(rect=[0, 0.12, 1, 1])
+            
+            st.pyplot(fig)
+            plt.close(fig)
+
         c5, c6 = st.columns(2)
 
         with c5:
