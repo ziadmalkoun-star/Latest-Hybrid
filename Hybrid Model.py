@@ -1460,10 +1460,56 @@ def reconcile_wholesale_afrr_dispatch_qh(
 
     combined_soc_qh = np.zeros(QH_PER_YEAR + 1, dtype=float)
     combined_soc_qh[0] = float(inputs.initial_soc_mwh)
-
+    
     for t in range(QH_PER_YEAR):
-        soc_next = combined_soc_qh[t] + charge_to_soc_qh[t] - discharge_from_soc_qh[t]
-        combined_soc_qh[t + 1] = min(max(soc_next, 0.0), inputs.batt_energy_mwh)
+        soc_now = combined_soc_qh[t]
+    
+        total_charge_input = (
+            corrected_wholesale_pv_to_batt_qh[t]
+            + wholesale_pv_curtailed_to_batt_qh[t]
+            + corrected_wholesale_grid_charge_qh[t]
+            + corrected_afrr_charge_qh[t]
+        )
+    
+        max_charge_input_by_headroom = max(
+            inputs.batt_energy_mwh - soc_now,
+            0.0
+        ) / max(inputs.eta_charge, 1e-12)
+    
+        if total_charge_input > max_charge_input_by_headroom + 1e-12:
+            scale = max_charge_input_by_headroom / max(total_charge_input, 1e-12)
+    
+            corrected_wholesale_pv_to_batt_qh[t] *= scale
+            wholesale_pv_curtailed_to_batt_qh[t] *= scale
+            corrected_wholesale_grid_charge_qh[t] *= scale
+            corrected_afrr_charge_qh[t] *= scale
+    
+        total_discharge_output = (
+            corrected_wholesale_discharge_qh[t]
+            + corrected_afrr_discharge_qh[t]
+        )
+    
+        max_discharge_output_by_soc = soc_now * inputs.eta_discharge
+    
+        if total_discharge_output > max_discharge_output_by_soc + 1e-12:
+            scale = max_discharge_output_by_soc / max(total_discharge_output, 1e-12)
+    
+            corrected_wholesale_discharge_qh[t] *= scale
+            corrected_afrr_discharge_qh[t] *= scale
+    
+        charge_to_soc = (
+            corrected_wholesale_pv_to_batt_qh[t]
+            + wholesale_pv_curtailed_to_batt_qh[t]
+            + corrected_wholesale_grid_charge_qh[t]
+            + corrected_afrr_charge_qh[t]
+        ) * inputs.eta_charge
+    
+        discharge_from_soc = (
+            corrected_wholesale_discharge_qh[t]
+            + corrected_afrr_discharge_qh[t]
+        ) / max(inputs.eta_discharge, 1e-12)
+    
+        combined_soc_qh[t + 1] = soc_now + charge_to_soc - discharge_from_soc
 
     def reshape_sum(arr: np.ndarray) -> np.ndarray:
         return np.asarray(arr, dtype=float).reshape(HOURS_PER_YEAR, QH_PER_HOUR).sum(axis=1)
