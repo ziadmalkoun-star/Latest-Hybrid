@@ -2122,7 +2122,7 @@ def app():
             afrr_capacity_start_hour = st.slider("Début aFRR Capacity", 0, 23, 20)
             afrr_capacity_end_hour = st.slider("Fin aFRR Capacity", 0, 23, 8)
 
-    st.subheader("aFRR énergie (quart-horaire)")
+    st.subheader("aFRR Energy")
     enable_afrr = st.checkbox("Activer l'arbitrage aFRR de nuit", value=False)
     allow_afrr_energy_without_capacity = st.checkbox(
         "Allow aFRR energy without aFRR capacity",
@@ -2174,10 +2174,10 @@ def app():
             st.error("CfD et PPA ne peuvent pas être activés en même temps.")
             return
         if enable_afrr_capacity and not enable_afrr:
-            st.error("Veuillez activer aFRR énergie pour utiliser aFRR Capacity.")
+            st.error("Veuillez activer aFRR Energy pour utiliser aFRR Capacity.")
             return
         if enable_afrr and (not enable_afrr_capacity) and (not allow_afrr_energy_without_capacity):
-            st.error("La participation en aFRR énergie sans aFRR Capacity n’est pas autorisée.")
+            st.error("La participation en aFRR Energy sans aFRR Capacity n’est pas autorisée.")
             return
         if enable_afrr_capacity and (afrr_capacity_up_upload is None or afrr_capacity_down_upload is None):
             st.error("Merci d'uploader les deux fichiers Excel aFRR Capacity UP et Down.")
