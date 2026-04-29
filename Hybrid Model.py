@@ -2350,7 +2350,7 @@ def app():
 
         if sim_inputs.enable_afrr:
             with st.spinner("Simulation aFRR quart-horaire de nuit en cours..."):
-                afrr_result = simulate_afrr_night_arbitrage(sim_inputs, result, afrr_capacity_result=afrr_capacity_result)
+                afrr_result = simulate_afrr_night_arbitrage(sim_inputs, result)
                 reconciliation = reconcile_wholesale_afrr_dispatch_qh(result_hourly=result, afrr_result=afrr_result, inputs=sim_inputs)
                 final_result = build_final_result_after_market_arbitration(base_result=result, reconciliation=reconciliation, inputs=sim_inputs)
 
