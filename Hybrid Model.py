@@ -79,8 +79,6 @@ class SimulationInputs:
     afrr_certified_capacity_down_mw: float = 0.0
     # Internal hourly market selection used to block wholesale and gate aFRR energy.
     afrr_capacity_selected_market_h: np.ndarray | None = None
-    afrr_up_capacity = final_result["afrr_certified_capacity_up_mw_h"]
-    afrr_down_capacity = final_result["afrr_certified_capacity_down_mw_h"]
 
     # Curtailment
     enable_tso_dso_curtailment: bool = False
