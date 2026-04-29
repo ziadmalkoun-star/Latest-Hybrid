@@ -2826,7 +2826,42 @@ def app():
             ],
             default="Idle",
         )
-
+        # aFRR Capacity awarded MW and winning prices
+        battery_debug["afrr_capacity_up_won_mw"] = np.where(
+            battery_debug["afrr_capacity_up_awarded"] == 1,
+            battery_debug["afrr_certified_capacity_up_mw"],
+            0.0,
+        )
+        
+        battery_debug["afrr_capacity_down_won_mw"] = np.where(
+            battery_debug["afrr_capacity_down_awarded"] == 1,
+            battery_debug["afrr_certified_capacity_down_mw"],
+            0.0,
+        )
+        
+        battery_debug["afrr_capacity_winning_price_eur_per_mw_h"] = np.select(
+            [
+                battery_debug["afrr_capacity_up_awarded"] == 1,
+                battery_debug["afrr_capacity_down_awarded"] == 1,
+            ],
+            [
+                battery_debug["afrr_capacity_up_price_eur_per_mw_h"],
+                battery_debug["afrr_capacity_down_price_eur_per_mw_h"],
+            ],
+            default=np.nan,
+        )
+        
+        battery_debug["afrr_capacity_winning_direction"] = np.select(
+            [
+                battery_debug["afrr_capacity_up_awarded"] == 1,
+                battery_debug["afrr_capacity_down_awarded"] == 1,
+            ],
+            [
+                "UP",
+                "DOWN",
+            ],
+            default="None",
+        )
         st.dataframe(
             battery_debug[[
                 "datetime",
@@ -2836,6 +2871,10 @@ def app():
                 "pv_to_battery_mwh",
                 "grid_charge_mwh",
                 "pv_curtailed_to_battery_mwh",
+                "afrr_capacity_winning_direction",
+                "afrr_capacity_up_won_mw",
+                "afrr_capacity_down_won_mw",
+                "afrr_capacity_winning_price_eur_per_mw_h",
                 "afrr_charge_mwh",
                 "wholesale_charge_price_eur_per_mwh",
                 "total_battery_discharge_mwh",
