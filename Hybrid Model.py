@@ -379,21 +379,29 @@ def read_afrr_capacity_csv(uploaded_file, year: int) -> np.ndarray:
     except Exception:
         pass
 
-    df = pd.read_csv(uploaded_file, header=None)
+    df = pd.read_csv(
+        uploaded_file,
+        header=None,
+        sep=";",
+        decimal=",",
+        engine="python"
+    )
+
+    # Remove fully empty columns caused by trailing semicolons
+    df = df.dropna(axis=1, how="all")
 
     if df.shape[0] < HOURS_PER_YEAR + 1 or df.shape[1] < 2:
         raise ValueError("Le CSV aFRR Capacity doit contenir A2:A8761 et au moins une colonne année.")
 
-    # Hours check
     hours = pd.to_numeric(df.iloc[1:HOURS_PER_YEAR + 1, 0], errors="coerce").to_numpy()
     expected_hours = np.arange(HOURS_PER_YEAR)
 
-    if not np.array_equal(hours.astype(int), expected_hours):
+    if len(hours) != HOURS_PER_YEAR or np.any(~np.isfinite(hours)) or not np.array_equal(hours.astype(int), expected_hours):
         raise ValueError("La colonne A doit contenir les heures 0 à 8759.")
 
-    # Year detection
     raw_years = df.iloc[0, 1:].to_numpy()
     normalized_years = []
+
     for y in raw_years:
         try:
             normalized_years.append(int(float(y)))
@@ -410,8 +418,8 @@ def read_afrr_capacity_csv(uploaded_file, year: int) -> np.ndarray:
         errors="coerce"
     ).to_numpy(dtype=float)
 
-    if np.any(~np.isfinite(values)):
-        raise ValueError("La colonne sélectionnée contient des valeurs invalides.")
+    if len(values) != HOURS_PER_YEAR or np.any(~np.isfinite(values)):
+        raise ValueError(f"La colonne {year} doit contenir exactement 8760 valeurs numériques.")
 
     return values
     
