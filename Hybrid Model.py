@@ -373,7 +373,48 @@ def read_afrr_capacity_excel(uploaded_file, year: int) -> np.ndarray:
 
     return values
 
+def read_afrr_capacity_csv(uploaded_file, year: int) -> np.ndarray:
+    try:
+        uploaded_file.seek(0)
+    except Exception:
+        pass
 
+    df = pd.read_csv(uploaded_file, header=None)
+
+    if df.shape[0] < HOURS_PER_YEAR + 1 or df.shape[1] < 2:
+        raise ValueError("Le CSV aFRR Capacity doit contenir A2:A8761 et au moins une colonne année.")
+
+    # Hours check
+    hours = pd.to_numeric(df.iloc[1:HOURS_PER_YEAR + 1, 0], errors="coerce").to_numpy()
+    expected_hours = np.arange(HOURS_PER_YEAR)
+
+    if not np.array_equal(hours.astype(int), expected_hours):
+        raise ValueError("La colonne A doit contenir les heures 0 à 8759.")
+
+    # Year detection
+    raw_years = df.iloc[0, 1:].to_numpy()
+    normalized_years = []
+    for y in raw_years:
+        try:
+            normalized_years.append(int(float(y)))
+        except Exception:
+            normalized_years.append(None)
+
+    if int(year) not in normalized_years:
+        raise ValueError(f"Le CSV ne contient pas l'année {year}.")
+
+    col_pos = normalized_years.index(int(year)) + 1
+
+    values = pd.to_numeric(
+        df.iloc[1:HOURS_PER_YEAR + 1, col_pos],
+        errors="coerce"
+    ).to_numpy(dtype=float)
+
+    if np.any(~np.isfinite(values)):
+        raise ValueError("La colonne sélectionnée contient des valeurs invalides.")
+
+    return values
+    
 def simulate_afrr_capacity(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
     """Simulate hourly aFRR Capacity awards and revenues.
 
@@ -1922,7 +1963,7 @@ def app():
         tso_dso_curtailment = st.radio("TSO/DSO Curtailment", ["No", "Yes"], horizontal=True)
         tso_dso_upload = None
         if tso_dso_curtailment == "Yes":
-            tso_dso_upload = st.file_uploader("Upload Annual Curtailment Curve Excel (12 monthly %)", type=["xlsx", "xls"], key="tso_dso_curve")
+            tso_dso_upload = st.file_uploader("Upload Annual Curtailment Curve Excel (12 monthly %)", type=["xlsx", "xls", "csv"], key="tso_dso_curve")
 
     with cur2:
         self_curtailment = st.radio("Self Curtailment", ["No", "Yes"], horizontal=True)
@@ -1972,7 +2013,7 @@ def app():
         )
         bess_degradation_upload = st.file_uploader(
             "BESS Degradation Curve",
-            type=["xlsx", "xls"],
+            type=["xlsx", "xls", "csv"],
             key="bess_degradation_curve",
         )
 
@@ -1993,12 +2034,12 @@ def app():
         with cap_col1:
             afrr_capacity_up_upload = st.file_uploader(
                 "Upload aFRR_Capacity_UP Excel",
-                type=["xlsx", "xls"],
+                type=["xlsx", "xls", "csv"],
                 key="afrr_capacity_up",
             )
             afrr_capacity_down_upload = st.file_uploader(
                 "Upload aFRR_Capacity_Down Excel",
-                type=["xlsx", "xls"],
+                type=["xlsx", "xls", "csv"],
                 key="afrr_capacity_down",
             )
 
@@ -2171,12 +2212,21 @@ def app():
         afrr_certified_capacity_up_mw = 0.0
         afrr_certified_capacity_down_mw = 0.0
 
+        def read_afrr_capacity_file(uploaded_file, year):
+            filename = uploaded_file.name.lower()
+        
+            if filename.endswith(".csv"):
+                return read_afrr_capacity_csv(uploaded_file, year)
+            else:
+                return read_afrr_capacity_excel(uploaded_file, year)
+        
+        
         if enable_afrr_capacity:
             try:
-                afrr_capacity_up_price_h_raw = read_afrr_capacity_excel(afrr_capacity_up_upload, DEFAULT_YEAR)
-                afrr_capacity_down_price_h_raw = read_afrr_capacity_excel(afrr_capacity_down_upload, DEFAULT_YEAR)
+                afrr_capacity_up_price_h_raw = read_afrr_capacity_file(afrr_capacity_up_upload, DEFAULT_YEAR)
+                afrr_capacity_down_price_h_raw = read_afrr_capacity_file(afrr_capacity_down_upload, DEFAULT_YEAR)
             except Exception as e:
-                st.error(f"Erreur fichier Excel aFRR Capacity: {e}")
+                st.error(f"Erreur fichier aFRR Capacity: {e}")
                 return
 
             afrr_certified_capacity_up_mw = (
