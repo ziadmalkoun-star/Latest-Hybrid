@@ -734,6 +734,14 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
     soc_steps = int(max(21, inputs.soc_steps))
     soc_grid = np.linspace(0.0, inputs.batt_energy_mwh, soc_steps)
 
+    afrr_up_req = (
+        certified_afrr_capacity_up / max(sim_inputs.eta_discharge, 1e-12)
+    )
+    
+    afrr_down_req = (
+        certified_afrr_capacity_down * sim_inputs.eta_charge
+    )
+
     def nearest_state_index(value: float) -> int:
         value = min(max(value, 0.0), inputs.batt_energy_mwh)
         return int(np.argmin(np.abs(soc_grid - value)))
@@ -778,6 +786,14 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
                 for j in transitions[i]:
                     delta_soc = soc_grid[j] - soc_i
 
+                    if afrr_up_mask[t]:
+                        if soc_prev < afrr_up_req[t]:
+                            continue  # infeasible state
+
+                    if afrr_down_mask[t]:
+                        if (sim_inputs.batt_energy_mwh - soc_prev) < afrr_down_req[t]:
+                            continue  # infeasible
+                            
                     # If aFRR Capacity is awarded for this hour, the battery must be reserved:
                     # no PV-to-battery, curtailed-PV-to-battery, grid charge or wholesale discharge.
                     if battery_blocked_by_afrr_capacity[t] and abs(delta_soc) > 1e-12:
