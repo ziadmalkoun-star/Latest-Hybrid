@@ -2123,7 +2123,7 @@ def app():
             afrr_capacity_end_hour = st.slider("Fin aFRR Capacity", 0, 23, 8)
 
     st.subheader("aFRR Energy")
-    enable_afrr = st.checkbox("Activer l'arbitrage aFRR de nuit", value=False)
+    enable_afrr = st.checkbox("Activer aFRR Energy", value=False)
     allow_afrr_energy_without_capacity = st.checkbox(
         "Allow aFRR energy without aFRR capacity",
         value=True,
