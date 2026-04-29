@@ -2407,7 +2407,7 @@ def app():
             afrr_night_start_hour=int(afrr_night_start_hour),
             afrr_night_end_hour=int(afrr_night_end_hour),
             afrr_pv_zero_tolerance_mwh=PV_ZERO_TOLERANCE_MWH,
-            afrr_n_qh_per_side=4,
+            afrr_n_qh_per_side=16,
             enable_afrr_capacity=enable_afrr_capacity,
             afrr_capacity_up_price_h=afrr_capacity_up_price_h_raw,
             afrr_capacity_down_price_h=afrr_capacity_down_price_h_raw,
