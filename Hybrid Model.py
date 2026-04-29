@@ -98,6 +98,8 @@ class SimulationInputs:
     project_lifetime_years: int = 1
     bess_degradation_curve_pct: np.ndarray | None = None
     degraded_bess_energy_by_year_mwh: np.ndarray | None = None
+    afrr_up_capacity = final_result["afrr_certified_capacity_up_mw_h"]
+    afrr_down_capacity = final_result["afrr_certified_capacity_down_mw_h"]
 
 def _validate_array_length(arr: np.ndarray, name: str, expected_len: int = HOURS_PER_YEAR) -> np.ndarray:
     arr = np.asarray(arr, dtype=float).reshape(-1)
