@@ -271,13 +271,10 @@ def read_bess_degradation_excel(uploaded_file, project_lifetime_years: int, init
 
     if degradation_pct[0] <= 1.5:
         degradation_pct = degradation_pct * 100.0
-    
-    if not np.isclose(degradation_pct[0], 100.0, atol=1e-6):
-        raise ValueError("La valeur de dégradation BESS en année 1 doit être égale à 100%.")
 
     degraded_mwh = np.zeros(project_lifetime_years, dtype=float)
-    degraded_mwh[0] = float(initial_bess_mwh)
-
+    degraded_mwh[0] = float(initial_bess_mwh) * degradation_pct[0] / 100.0
+    
     for y in range(1, project_lifetime_years):
         degraded_mwh[y] = degraded_mwh[y - 1] * degradation_pct[y] / 100.0
 
