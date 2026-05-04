@@ -2442,53 +2442,9 @@ def app():
 
         inputs_df = build_inputs_dataframe(sim_inputs)
 
-        yearly_results = []
+        with st.spinner("Optimisation économique annuelle en cours..."):
+            result = optimize_dispatch_dp(sim_inputs)
 
-        for y in range(project_lifetime_years):
-            sim_inputs.batt_energy_mwh = degraded_bess_energy_by_year_mwh[y]
-        
-            # Make sure SOC targets do not exceed degraded capacity
-            sim_inputs.initial_soc_mwh = min(initial_soc, sim_inputs.batt_energy_mwh)
-            sim_inputs.final_soc_mwh = min(final_soc, sim_inputs.batt_energy_mwh)
-        
-            with st.spinner(f"Optimisation année {y + 1}/{project_lifetime_years}..."):
-                result_y = optimize_dispatch_dp(sim_inputs)
-        
-            result_y["project_year"] = np.full(HOURS_PER_YEAR, y + 1)
-            result_y["bess_energy_mwh_degraded"] = np.full(HOURS_PER_YEAR, sim_inputs.batt_energy_mwh)
-        
-            yearly_results.append(result_y)
-
-        total_direct_pv_revenue = sum(float(r["total_direct_pv_revenue"][0]) for r in yearly_results)
-        total_batt_sale_revenue = sum(float(r["total_batt_sale_revenue"][0]) for r in yearly_results)
-        total_grid_charge_cost = sum(float(r["total_grid_charge_cost"][0]) for r in yearly_results)
-        total_nightly_revenue = sum(float(r["nightly_revenue_total"][0]) for r in yearly_results)
-        
-        total_revenue = (
-            total_direct_pv_revenue
-            + total_batt_sale_revenue
-            - total_grid_charge_cost
-            + total_nightly_revenue
-        )
-        
-        lifetime_summary_df = pd.DataFrame({
-            "Year": np.arange(1, project_lifetime_years + 1),
-            "BESS_energy_mwh": degraded_bess_energy_by_year_mwh,
-            "PV_revenue_EUR": [float(r["total_direct_pv_revenue"][0]) for r in yearly_results],
-            "Battery_sale_revenue_EUR": [float(r["total_batt_sale_revenue"][0]) for r in yearly_results],
-            "Grid_charge_cost_EUR": [float(r["total_grid_charge_cost"][0]) for r in yearly_results],
-            "Battery_net_revenue_EUR": [
-                float(r["total_batt_sale_revenue"][0])
-                - float(r["total_grid_charge_cost"][0])
-                + float(r["nightly_revenue_total"][0])
-                for r in yearly_results
-            ],
-            "Total_revenue_EUR": [float(r["total_revenue"][0]) for r in yearly_results],
-            "Equivalent_cycles": [float(r["equivalent_cycles"][0]) for r in yearly_results],
-        })
-        
-        result = yearly_results[-1]
-        
         afrr_result = None
         reconciliation = None
         final_result = result
@@ -2797,11 +2753,6 @@ def app():
             (hourly_df["datetime"] < pd.Timestamp(f"{DEFAULT_YEAR}-06-04 00:00:00"))
         ].copy()
 
-        st.subheader("Lifetime yearly results with BESS degradation")
-        st.dataframe(lifetime_summary_df, use_container_width=True, hide_index=True)
-        
-        st.metric("Lifetime total revenue", f"{total_revenue:,.0f} EUR")
-        
         st.subheader("Debug curtailment (3 premiers jours de juin)")
         st.dataframe(
             debug[[
