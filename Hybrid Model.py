@@ -2486,7 +2486,9 @@ def app():
             "Total_revenue_EUR": [float(r["total_revenue"][0]) for r in yearly_results],
             "Equivalent_cycles": [float(r["equivalent_cycles"][0]) for r in yearly_results],
         })
-
+        
+        result = yearly_results[-1]
+        
         afrr_result = None
         reconciliation = None
         final_result = result
