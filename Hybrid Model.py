@@ -769,6 +769,10 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
         j_max = np.searchsorted(soc_grid, min(max_soc_mwh, soc + charge_soc_max), side="right") - 1
         transitions.append(np.arange(j_min, j_max + 1, dtype=int))
 
+    future_best_sell_price_from_t = np.empty(T, dtype=float)
+    future_best_sell_price_from_t[-1] = -1e30
+    future_best_sell_price_from_t[:-1] = np.maximum.accumulate(batt_sell[:0:-1])[::-1]
+    
     def run_dp_once(required_discharge_price_estimate: np.ndarray) -> Dict[str, np.ndarray]:
         neg_inf = -1e30
         value_next = np.full(soc_steps, neg_inf, dtype=float)
@@ -824,7 +828,7 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
                             if grid_buy_t > charge_threshold_series[t]:
                                 continue
                         
-                            future_best_sell_price = np.max(batt_sell[t + 1:]) if t + 1 < T else -1e30
+                            future_best_sell_price = future_best_sell_price_from_t[t]
                         
                             required_future_sell_price = (
                                 grid_buy_t / max(inputs.eta_charge * inputs.eta_discharge, 1e-12)
@@ -1007,7 +1011,7 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
             "battery_blocked_by_afrr_capacity": battery_blocked_by_afrr_capacity.astype(int),
         }
 
-    max_passes = 4
+    max_passes = 2
     required_estimate = np.full(T, -1e30, dtype=float)
     final_result = None
     
