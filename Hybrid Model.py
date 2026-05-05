@@ -1074,7 +1074,7 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
         capped = run_dp_once(required_discharge_price_estimate, high_penalty)
 
         # Increase the shadow price until the selected annual dispatch respects the cap.
-        for _ in range(6):
+        for _ in range(3):
             if float(capped["energy_shifted_mwh"][0]) <= max_annual_discharge_mwh + cap_tolerance_mwh:
                 break
             low_penalty = high_penalty
@@ -1088,7 +1088,7 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
             )
 
         best_capped = capped
-        for _ in range(6):
+        for _ in range(3):
             mid_penalty = 0.5 * (low_penalty + high_penalty)
             candidate = run_dp_once(required_discharge_price_estimate, mid_penalty)
             if float(candidate["energy_shifted_mwh"][0]) <= max_annual_discharge_mwh + cap_tolerance_mwh:
