@@ -847,6 +847,12 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
                                 continue
 
                     elif delta_soc < -1e-12:
+                        # PV priority rule: do not allow wholesale BESS discharge
+                        # when sellable PV is available. This preserves grid export
+                        # capacity for PV production first.
+                        if pv_sellable_t > 1e-9:
+                            continue
+
                         discharge_candidate = (-delta_soc) * inputs.eta_discharge
 
                         if discharge_candidate > 1e-9:
@@ -942,7 +948,13 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
                 pv_direct_candidate = pv_sellable_t - sellable_pv_to_batt
 
             elif delta_soc < -1e-12:
-                discharge[t] = (-delta_soc) * inputs.eta_discharge
+                # Safety mirror of the DP rule above. In normal operation the
+                # selected policy should never discharge when sellable PV is
+                # available, but this keeps the reconstructed flows consistent.
+                if pv_sellable_t > 1e-9:
+                    discharge[t] = 0.0
+                else:
+                    discharge[t] = (-delta_soc) * inputs.eta_discharge
 
             pv_to_batt[t] = sellable_pv_to_batt
             pv_curtailed_to_battery[t] = recoverable_pv_to_batt
@@ -1432,6 +1444,13 @@ def reconcile_wholesale_afrr_dispatch_qh(
                 corrected_afrr_discharge_qh[t] = 0.0
         elif inputs.enable_afrr_capacity:
             corrected_afrr_charge_qh[t] = 0.0
+            corrected_afrr_discharge_qh[t] = 0.0
+
+        # PV priority rule at quarter-hour reconciliation level:
+        # if PV is being exported in this quarter-hour, block BESS discharge
+        # so PV keeps priority on the grid export limit.
+        if pv_direct_qh[t] > 1e-9:
+            corrected_wholesale_discharge_qh[t] = 0.0
             corrected_afrr_discharge_qh[t] = 0.0
 
         w_dis = corrected_wholesale_discharge_qh[t]
