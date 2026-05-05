@@ -48,7 +48,7 @@ class SimulationInputs:
     cycle_cost_eur_per_mwh: float = 0.0
     charge_quantile: float = 20.0
     discharge_quantile: float = 80.0
-    max_cycles_per_day: float = 1.0
+    max_cycles_per_year: float = 1.0
     min_spread_arbitrage_eur_per_mwh: float = 0.0
 
     # Capture rates
@@ -739,6 +739,17 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
     if T != HOURS_PER_YEAR:
         raise ValueError("Toutes les séries doivent contenir 8760 heures.")
 
+    if inputs.max_cycles_per_year < 0:
+        raise ValueError("Cycles max / an doit être positif ou nul.")
+
+    max_annual_discharge_mwh = float(inputs.max_cycles_per_year) * float(inputs.batt_energy_mwh)
+    minimum_discharge_to_reach_final_mwh = max(inputs.initial_soc_mwh - inputs.final_soc_mwh, 0.0) * inputs.eta_discharge
+    if max_annual_discharge_mwh + 1e-9 < minimum_discharge_to_reach_final_mwh:
+        raise ValueError(
+            "Cycles max / an est trop faible pour atteindre le SOC final demandé. "
+            f"Minimum requis: {minimum_discharge_to_reach_final_mwh / max(inputs.batt_energy_mwh, 1e-12):.3f} cycles/an."
+        )
+
     # aFRR Capacity awarded hours reserve the battery and block wholesale battery actions.
     if inputs.afrr_capacity_selected_market_h is None:
         afrr_capacity_selected_market_h = np.full(T, "none", dtype=object)
@@ -773,7 +784,10 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
     future_best_sell_price_from_t[-1] = -1e30
     future_best_sell_price_from_t[:-1] = np.maximum.accumulate(batt_sell[:0:-1])[::-1]
     
-    def run_dp_once(required_discharge_price_estimate: np.ndarray) -> Dict[str, np.ndarray]:
+    def run_dp_once(
+        required_discharge_price_estimate: np.ndarray,
+        annual_cycle_budget_penalty_eur_per_mwh: float = 0.0,
+    ) -> Dict[str, np.ndarray]:
         neg_inf = -1e30
         value_next = np.full(soc_steps, neg_inf, dtype=float)
         value_next[final_idx] = 0.0
@@ -883,6 +897,9 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
                     elif delta_soc < -1e-12:
                         reward += discharge_candidate * batt_sell_t
                         reward -= cycle_penalty
+                        # Shadow price used only by the optimizer to allocate a limited
+                        # annual cycle budget to the best spreads over the full year.
+                        reward -= annual_cycle_budget_penalty_eur_per_mwh * discharge_candidate
 
                     total_val = reward + value_next[j]
                     if total_val > best_val:
@@ -1003,6 +1020,9 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
         total_grid_charge_cost = float(grid_charge_cost.sum())
         nightly_revenue_total = float(inputs.nightly_bess_revenue_eur * (T // 24))
         total_revenue = total_direct_pv_revenue + total_batt_sale_revenue - total_grid_charge_cost + nightly_revenue_total
+        total_discharged_mwh = float(discharge.sum())
+        equivalent_cycles = total_discharged_mwh / max(inputs.batt_energy_mwh, 1e-12)
+        remaining_cycle_budget_mwh = max(max_annual_discharge_mwh - total_discharged_mwh, 0.0)
 
         return {
             "soc": soc,
@@ -1019,9 +1039,13 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
             "total_grid_charge_cost": np.array([total_grid_charge_cost]),
             "nightly_revenue_total": np.array([nightly_revenue_total]),
             "total_revenue": np.array([total_revenue]),
-            "equivalent_cycles": np.array([discharge.sum() / max(inputs.batt_energy_mwh, 1e-12)]),
-            "energy_sold_total_mwh": np.array([pv_direct.sum() + discharge.sum()]),
-            "energy_shifted_mwh": np.array([discharge.sum()]),
+            "equivalent_cycles": np.array([equivalent_cycles]),
+            "energy_sold_total_mwh": np.array([pv_direct.sum() + total_discharged_mwh]),
+            "energy_shifted_mwh": np.array([total_discharged_mwh]),
+            "max_cycles_per_year": np.array([float(inputs.max_cycles_per_year)]),
+            "annual_discharge_cap_mwh": np.array([max_annual_discharge_mwh]),
+            "remaining_cycle_budget_mwh": np.array([remaining_cycle_budget_mwh]),
+            "annual_cycle_budget_penalty_eur_per_mwh": np.array([float(annual_cycle_budget_penalty_eur_per_mwh)]),
             "pv_direct_sold_mwh": np.array([pv_direct.sum()]),
             "avg_stored_charge_price": avg_stored_charge_price,
             "required_discharge_price": required_discharge_price,
@@ -1031,34 +1055,78 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
             "battery_blocked_by_afrr_capacity": battery_blocked_by_afrr_capacity.astype(int),
         }
 
+    def run_dp_with_annual_cycle_cap(required_discharge_price_estimate: np.ndarray) -> Dict[str, np.ndarray]:
+        """Run the annual DP with a global annual discharge budget.
+
+        A direct SOC x cycle-budget DP would be very large for 8760 hours.
+        This uses the equivalent Lagrangian form: a shadow price is applied to
+        every MWh discharged, then found by bisection. Because the DP still sees
+        the full 8760-hour horizon, it can skip low-value cycles early in the
+        year and keep the limited annual cycle budget for better spreads later.
+        """
+        cap_tolerance_mwh = max(1e-6, 1e-6 * max(inputs.batt_energy_mwh, 1.0))
+        uncapped = run_dp_once(required_discharge_price_estimate, 0.0)
+        if float(uncapped["energy_shifted_mwh"][0]) <= max_annual_discharge_mwh + cap_tolerance_mwh:
+            return uncapped
+
+        low_penalty = 0.0
+        high_penalty = max(1.0, float(np.nanmax(batt_sell) - np.nanmin(grid_buy) + inputs.min_spread_arbitrage_eur_per_mwh))
+        capped = run_dp_once(required_discharge_price_estimate, high_penalty)
+
+        # Increase the shadow price until the selected annual dispatch respects the cap.
+        for _ in range(16):
+            if float(capped["energy_shifted_mwh"][0]) <= max_annual_discharge_mwh + cap_tolerance_mwh:
+                break
+            low_penalty = high_penalty
+            high_penalty *= 2.0
+            capped = run_dp_once(required_discharge_price_estimate, high_penalty)
+
+        if float(capped["energy_shifted_mwh"][0]) > max_annual_discharge_mwh + cap_tolerance_mwh:
+            raise RuntimeError(
+                "Impossible de respecter Cycles max / an avec les contraintes SOC initial/final et les pas de SOC choisis. "
+                "Augmentez Cycles max / an, réduisez le SOC final requis, ou augmentez le nombre de pas de SOC."
+            )
+
+        best_capped = capped
+        for _ in range(14):
+            mid_penalty = 0.5 * (low_penalty + high_penalty)
+            candidate = run_dp_once(required_discharge_price_estimate, mid_penalty)
+            if float(candidate["energy_shifted_mwh"][0]) <= max_annual_discharge_mwh + cap_tolerance_mwh:
+                high_penalty = mid_penalty
+                best_capped = candidate
+            else:
+                low_penalty = mid_penalty
+
+        return best_capped
+
     max_passes = 2
     required_estimate = np.full(T, -1e30, dtype=float)
     final_result = None
-    
+
     for _ in range(max_passes):
-        candidate = run_dp_once(required_estimate)
-    
+        candidate = run_dp_with_annual_cycle_cap(required_estimate)
+
         new_estimate = np.nan_to_num(
             candidate["required_discharge_price"],
             nan=-1e30,
             posinf=1e30,
             neginf=-1e30,
         )
-    
-        # Important: only tighten the gate, never loosen it
+
+        # Important: only tighten the gate, never loosen it.
         tightened_estimate = np.maximum(required_estimate, new_estimate)
-    
+
         discharge_mask = candidate["discharge"] > 1e-6
         valid_required_mask = np.isfinite(candidate["required_discharge_price"])
-    
+
         violations = (
             discharge_mask
             & valid_required_mask
             & (batt_sell < candidate["required_discharge_price"] - 1e-9)
         )
-    
+
         final_result = candidate
-    
+
         if not violations.any() and np.allclose(
             tightened_estimate,
             required_estimate,
@@ -1066,9 +1134,9 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
             rtol=0.0,
         ):
             break
-    
+
         required_estimate = tightened_estimate.copy()
-    
+
     return final_result
 
 
@@ -1641,11 +1709,17 @@ def build_final_result_after_market_arbitration(
     total_direct_pv_revenue = float(final["pv_direct_revenue"].sum())
     nightly_revenue_total = float(final["nightly_revenue_total"][0])
 
+    total_discharged_mwh = float(final["discharge"].sum())
+    annual_discharge_cap_mwh = float(inputs.max_cycles_per_year) * float(inputs.batt_energy_mwh)
+
     final["total_batt_sale_revenue"] = np.array([total_batt_sale_revenue])
     final["total_grid_charge_cost"] = np.array([total_grid_charge_cost])
-    final["energy_shifted_mwh"] = np.array([float(final["discharge"].sum())])
-    final["energy_sold_total_mwh"] = np.array([float(final["pv_direct"].sum() + final["discharge"].sum())])
-    final["equivalent_cycles"] = np.array([float(final["discharge"].sum() / max(inputs.batt_energy_mwh, 1e-12))])
+    final["energy_shifted_mwh"] = np.array([total_discharged_mwh])
+    final["energy_sold_total_mwh"] = np.array([float(final["pv_direct"].sum() + total_discharged_mwh)])
+    final["equivalent_cycles"] = np.array([float(total_discharged_mwh / max(inputs.batt_energy_mwh, 1e-12))])
+    final["max_cycles_per_year"] = np.array([float(inputs.max_cycles_per_year)])
+    final["annual_discharge_cap_mwh"] = np.array([annual_discharge_cap_mwh])
+    final["remaining_cycle_budget_mwh"] = np.array([max(annual_discharge_cap_mwh - total_discharged_mwh, 0.0)])
 
     final["total_revenue"] = np.array([
         total_direct_pv_revenue + total_batt_sale_revenue - total_grid_charge_cost + nightly_revenue_total
@@ -1797,6 +1871,9 @@ def build_summary_table(
     candidate_curtailed = float(np.sum(curtailment_outputs["pv_curtailment_candidate_mwh"]))
     recovered_to_battery = float(np.sum(curtailment_outputs["pv_curtailed_to_battery_mwh_actual"]))
     residual_lost = float(np.sum(curtailment_outputs["pv_curtailed_residual_lost_mwh"]))
+    max_cycles_per_year = float(result["max_cycles_per_year"][0]) if "max_cycles_per_year" in result else np.nan
+    annual_discharge_cap_mwh = float(result["annual_discharge_cap_mwh"][0]) if "annual_discharge_cap_mwh" in result else np.nan
+    remaining_cycle_budget_mwh = float(result["remaining_cycle_budget_mwh"][0]) if "remaining_cycle_budget_mwh" in result else np.nan
 
     rows = [
         ("PV Capture Rate", pv_capture_rate_pct, "%"),
@@ -1833,6 +1910,9 @@ def build_summary_table(
         ("Énergie déchargée aFRR", afrr_discharged_mwh, "MWh"),
         ("Énergie PV vendue directement", pv_sold_mwh, "MWh"),
         ("Cycles équivalents batterie", float(result["equivalent_cycles"][0]), "cycles/an"),
+        ("Cycles max / an", max_cycles_per_year, "cycles/an"),
+        ("Annual discharge cap MWh", annual_discharge_cap_mwh, "MWh"),
+        ("Remaining cycle budget", remaining_cycle_budget_mwh, "MWh"),
         ("Production PV théorique brute", float(pv_stats["annual_dc_mwh"]), "MWh"),
         ("Production PV nette valorisable", float(pv_stats["annual_net_mwh"]), "MWh"),
         ("Énergie PV perdue (pertes + disponibilité)", float(pv_stats["annual_losses_mwh"]), "MWh"),
@@ -1917,7 +1997,7 @@ def build_inputs_dataframe(inputs: SimulationInputs) -> pd.DataFrame:
         ("cycle_cost_eur_per_mwh", inputs.cycle_cost_eur_per_mwh),
         ("charge_quantile", inputs.charge_quantile),
         ("discharge_quantile", inputs.discharge_quantile),
-        ("max_cycles_per_day", inputs.max_cycles_per_day),
+        ("max_cycles_per_year", inputs.max_cycles_per_year),
         ("min_spread_arbitrage_eur_per_mwh", inputs.min_spread_arbitrage_eur_per_mwh),
         ("pv_capture_rate_pct", inputs.pv_capture_rate_pct),
         ("bess_capture_rate_pct", inputs.bess_capture_rate_pct),
@@ -2038,7 +2118,7 @@ def app():
         initial_soc = st.number_input("SOC initial batterie (MWh)", min_value=0.0, value=batt_energy_mwh*max_soc_pct/100, step=1.0)
         final_soc = st.number_input("SOC final cible batterie (MWh)", min_value=0.0, value=batt_energy_mwh*min_soc_pct/100, step=1.0)
         bess_capture_rate_pct = st.number_input("BESS Capture Rate (%)", min_value=0.0, max_value=100.0, value=100.0, step=1.0)
-        max_cycles = st.number_input("Cycles max / jour", min_value=0.0, value=1.0, step=0.1)
+        max_cycles_per_year = st.number_input("Cycles max / an", min_value=0.0, value=1.0, step=0.1)
         cycle_cost = st.number_input("Coût de cycle batterie (EUR/MWh)", value=5.0)
         min_spread_arbitrage = st.number_input("Minimum Spread for Arbitrage (EUR/MWh)", min_value=0.0, value=10.0, step=1.0)
 
@@ -2492,7 +2572,7 @@ def app():
             cycle_cost_eur_per_mwh=cycle_cost,
             charge_quantile=charge_quantile,
             discharge_quantile=discharge_quantile,
-            max_cycles_per_day=max_cycles,
+            max_cycles_per_year=max_cycles_per_year,
             min_spread_arbitrage_eur_per_mwh=min_spread_arbitrage,
             pv_capture_rate_pct=pv_capture_rate_pct,
             bess_capture_rate_pct=bess_capture_rate_pct,
