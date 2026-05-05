@@ -1977,7 +1977,7 @@ def app():
 
     with col1:
         batt_power_mw = st.number_input("Puissance batterie utile (MW)", min_value=0.0, value=50.0, step=1.0)
-        batt_energy_mwh = st.number_input("Capacité batterie utile (MWh)", min_value=0.0, value=100.0, step=1.0)
+        batt_energy_mwh = st.number_input("Capacité batterie utile (MWh)", min_value=0.0, value=200.0, step=1.0)
         pv_dc_mw = st.number_input("Puissance PV DC (MWc)", min_value=0.0, value=100.0, step=1.0)
         productible = st.number_input("Productible PV (kWh/kWc/an)", min_value=0.0, value=1200.0, step=10.0)
         grid_export_limit_mw = st.number_input("Limite injection réseau (MW)", min_value=0.0, value=100.0, step=1.0)
@@ -1997,8 +1997,8 @@ def app():
     with col3:
         nightly_bess_revenue = st.number_input("Revenu services système nuit (EUR/nuit)", min_value=0.0, value=0.0, step=10.0)
         soc_steps = st.slider("Nombre de pas de SOC pour l'optimisation", min_value=21, max_value=201, value=51, step=10)
-        initial_soc = st.number_input("SOC initial batterie (MWh)", min_value=0.0, value=20.0, step=1.0)
-        final_soc = st.number_input("SOC final cible batterie (MWh)", min_value=0.0, value=20.0, step=1.0)
+        initial_soc = st.number_input("SOC initial batterie (MWh)", min_value=0.0, value=batt_energy_mwh, step=1.0)
+        final_soc = st.number_input("SOC final cible batterie (MWh)", min_value=0.0, value=60.0, step=1.0)
         min_soc_pct = st.slider("Minimum SOC batterie (%)", 0, 100, 20)
         max_soc_pct = st.slider("Maximum SOC batterie (%)", 0, 100, 90)
         bess_capture_rate_pct = st.number_input("BESS Capture Rate (%)", min_value=0.0, max_value=100.0, value=100.0, step=1.0)
