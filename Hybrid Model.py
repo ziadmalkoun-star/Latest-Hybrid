@@ -1011,7 +1011,7 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
             "battery_blocked_by_afrr_capacity": battery_blocked_by_afrr_capacity.astype(int),
         }
 
-    max_passes = 2
+    max_passes = 3
     required_estimate = np.full(T, -1e30, dtype=float)
     final_result = None
     
