@@ -823,7 +823,15 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
 
                         grid_charge = max(remaining_after_sellable, 0.0)
                         pv_direct_candidate = pv_sellable_t - sellable_pv_to_batt
+                        pv_is_producing = (pv_sellable_t + pv_recoverable_t) > 1e-9
+                        
+                        # Block grid charging when PV is producing
+                        if grid_charge > 1e-9 and pv_sellable_t > 1e-9:
+                            continue
 
+                        if grid_charge > 1e-9 and pv_is_producing:
+                            continue
+                            
                         if grid_charge > 1e-9:
                             if grid_buy_t > charge_threshold_series[t]:
                                 continue
