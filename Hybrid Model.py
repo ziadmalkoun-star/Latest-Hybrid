@@ -1996,7 +1996,7 @@ def app():
 
     with col3:
         nightly_bess_revenue = st.number_input("Revenu services système nuit (EUR/nuit)", min_value=0.0, value=0.0, step=10.0)
-        soc_steps = st.slider("Nombre de pas de SOC pour l'optimisation", min_value=21, max_value=201, value=101, step=10)
+        soc_steps = st.slider("Nombre de pas de SOC pour l'optimisation", min_value=21, max_value=201, value=51, step=10)
         initial_soc = st.number_input("SOC initial batterie (MWh)", min_value=0.0, value=20.0, step=1.0)
         final_soc = st.number_input("SOC final cible batterie (MWh)", min_value=0.0, value=20.0, step=1.0)
         min_soc_pct = st.slider("Minimum SOC batterie (%)", 0, 100, 20)
