@@ -42,6 +42,8 @@ class SimulationInputs:
     soc_steps: int = 101
     initial_soc_mwh: float = 0.0
     final_soc_mwh: float = 0.0
+    min_soc_pct: float = 0.0
+    max_soc_pct: float = 100.0
     grid_export_limit_mw: float = 0.0
     cycle_cost_eur_per_mwh: float = 0.0
     charge_quantile: float = 20.0
@@ -114,6 +116,8 @@ def build_combined_soc_with_afrr(
     initial_soc_mwh: float,
     eta_charge: float,
     eta_discharge: float,
+    min_soc_pct: float = 0.0,
+    max_soc_pct: float = 100.0,
 ) -> Dict[str, np.ndarray]:
 
     wholesale_pv_to_batt_h = np.asarray(result_hourly["pv_to_batt"], dtype=float)
@@ -152,12 +156,15 @@ def build_combined_soc_with_afrr(
     combined_discharge_from_soc_qh = wholesale_discharge_from_soc_qh + afrr_discharge_from_soc_qh
 
     # SOC simulation
+    min_soc_mwh = batt_energy_mwh * min_soc_pct / 100.0
+    max_soc_mwh = batt_energy_mwh * max_soc_pct / 100.0
+
     soc_qh = np.zeros(QH_PER_YEAR + 1, dtype=float)
-    soc_qh[0] = float(initial_soc_mwh)
+    soc_qh[0] = min(max(float(initial_soc_mwh), min_soc_mwh), max_soc_mwh)
 
     for t in range(QH_PER_YEAR):
         soc_next = soc_qh[t] + combined_charge_to_soc_qh[t] - combined_discharge_from_soc_qh[t]
-        soc_qh[t + 1] = min(max(soc_next, 0.0), batt_energy_mwh)
+        soc_qh[t + 1] = min(max(soc_next, min_soc_mwh), max_soc_mwh)
 
     soc_hourly_end = soc_qh[4::4]
 
@@ -713,6 +720,20 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
         raise ValueError("Le SOC initial ne peut pas dépasser la capacité batterie.")
     if inputs.final_soc_mwh > inputs.batt_energy_mwh:
         raise ValueError("Le SOC final ne peut pas dépasser la capacité batterie.")
+    if not (0.0 <= inputs.min_soc_pct <= 100.0):
+        raise ValueError("Minimum SOC batterie (%) doit être compris entre 0 et 100 %.")
+    if not (0.0 <= inputs.max_soc_pct <= 100.0):
+        raise ValueError("Maximum SOC batterie (%) doit être compris entre 0 et 100 %.")
+    if inputs.min_soc_pct >= inputs.max_soc_pct:
+        raise ValueError("Minimum SOC batterie (%) doit être strictement inférieur au Maximum SOC batterie (%).")
+
+    min_soc_mwh = inputs.batt_energy_mwh * inputs.min_soc_pct / 100.0
+    max_soc_mwh = inputs.batt_energy_mwh * inputs.max_soc_pct / 100.0
+
+    if inputs.initial_soc_mwh < min_soc_mwh or inputs.initial_soc_mwh > max_soc_mwh:
+        raise ValueError("Le SOC initial doit être compris dans la plage SOC autorisée.")
+    if inputs.final_soc_mwh < min_soc_mwh or inputs.final_soc_mwh > max_soc_mwh:
+        raise ValueError("Le SOC final doit être compris dans la plage SOC autorisée.")
 
     T = len(pv_sellable)
     if T != HOURS_PER_YEAR:
@@ -729,10 +750,10 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
     battery_blocked_by_afrr_capacity = np.isin(afrr_capacity_selected_market_h, ["up", "down"])
 
     soc_steps = int(max(21, inputs.soc_steps))
-    soc_grid = np.linspace(0.0, inputs.batt_energy_mwh, soc_steps)
+    soc_grid = np.linspace(min_soc_mwh, max_soc_mwh, soc_steps)
 
     def nearest_state_index(value: float) -> int:
-        value = min(max(value, 0.0), inputs.batt_energy_mwh)
+        value = min(max(value, min_soc_mwh), max_soc_mwh)
         return int(np.argmin(np.abs(soc_grid - value)))
 
     init_idx = nearest_state_index(inputs.initial_soc_mwh)
@@ -744,8 +765,8 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
 
     transitions = []
     for i, soc in enumerate(soc_grid):
-        j_min = np.searchsorted(soc_grid, max(0.0, soc - discharge_soc_max), side="left")
-        j_max = np.searchsorted(soc_grid, min(inputs.batt_energy_mwh, soc + charge_soc_max), side="right") - 1
+        j_min = np.searchsorted(soc_grid, max(min_soc_mwh, soc - discharge_soc_max), side="left")
+        j_max = np.searchsorted(soc_grid, min(max_soc_mwh, soc + charge_soc_max), side="right") - 1
         transitions.append(np.arange(j_min, j_max + 1, dtype=int))
 
     def run_dp_once(required_discharge_price_estimate: np.ndarray) -> Dict[str, np.ndarray]:
@@ -1162,7 +1183,9 @@ def simulate_afrr_night_arbitrage(inputs: SimulationInputs, result_hourly: Dict[
     afrr_soc_qh = np.zeros(QH_PER_YEAR, dtype=float)
 
     daily_logs = []
-    soc_current = float(result_hourly["soc"][0])
+    min_soc_mwh = inputs.batt_energy_mwh * inputs.min_soc_pct / 100.0
+    max_soc_mwh = inputs.batt_energy_mwh * inputs.max_soc_pct / 100.0
+    soc_current = min(max(float(result_hourly["soc"][0]), min_soc_mwh), max_soc_mwh)
 
     df = pd.DataFrame({
         "datetime": idx_qh,
@@ -1226,7 +1249,7 @@ def simulate_afrr_night_arbitrage(inputs: SimulationInputs, result_hourly: Dict[
             soc_working = soc_day_start
 
             for rel_idx in charge_rel_indices:
-                available_capacity_mwh = max(inputs.batt_energy_mwh - soc_working, 0.0)
+                available_capacity_mwh = max(max_soc_mwh - soc_working, 0.0)
                 stored_this_qh = min(limits["stored_per_qh_mwh"], available_capacity_mwh)
                 if stored_this_qh <= 1e-9:
                     continue
@@ -1241,12 +1264,13 @@ def simulate_afrr_night_arbitrage(inputs: SimulationInputs, result_hourly: Dict[
                 charge_cost_eur_total += day_charge_cost_qh_eur[rel_idx]
 
                 soc_working += stored_this_qh
+                soc_working = min(max(soc_working, min_soc_mwh), max_soc_mwh)
                 day_soc_trace[rel_idx:] = soc_working
 
             for rel_idx in discharge_rel_indices:
                 max_output_by_power = limits["output_per_qh_mwh"]
                 max_output_by_export = inputs.grid_export_limit_mw * QH_DT_HOURS
-                max_output_by_soc = soc_working * inputs.eta_discharge
+                max_output_by_soc = max(soc_working - min_soc_mwh, 0.0) * inputs.eta_discharge
 
                 discharge_this_qh = min(max_output_by_power, max_output_by_export, max_output_by_soc)
                 if discharge_this_qh <= 1e-9:
@@ -1264,6 +1288,7 @@ def simulate_afrr_night_arbitrage(inputs: SimulationInputs, result_hourly: Dict[
                 cycle_cost_eur_total += day_cycle_cost_qh_eur[rel_idx]
 
                 soc_working -= soc_removed_this_qh
+                soc_working = min(max(soc_working, min_soc_mwh), max_soc_mwh)
                 day_soc_trace[rel_idx:] = soc_working
 
             net_revenue_eur_total = sale_revenue_eur_total - charge_cost_eur_total - cycle_cost_eur_total
@@ -1455,8 +1480,11 @@ def reconcile_wholesale_afrr_dispatch_qh(
         + corrected_afrr_discharge_qh
     ) / max(inputs.eta_discharge, 1e-12)
 
+    min_soc_mwh = inputs.batt_energy_mwh * inputs.min_soc_pct / 100.0
+    max_soc_mwh = inputs.batt_energy_mwh * inputs.max_soc_pct / 100.0
+
     combined_soc_qh = np.zeros(QH_PER_YEAR + 1, dtype=float)
-    combined_soc_qh[0] = float(inputs.initial_soc_mwh)
+    combined_soc_qh[0] = min(max(float(inputs.initial_soc_mwh), min_soc_mwh), max_soc_mwh)
     
     for t in range(QH_PER_YEAR):
         soc_now = combined_soc_qh[t]
@@ -1469,7 +1497,7 @@ def reconcile_wholesale_afrr_dispatch_qh(
         )
     
         max_charge_input_by_headroom = max(
-            inputs.batt_energy_mwh - soc_now,
+            max_soc_mwh - soc_now,
             0.0
         ) / max(inputs.eta_charge, 1e-12)
     
@@ -1486,7 +1514,7 @@ def reconcile_wholesale_afrr_dispatch_qh(
             + corrected_afrr_discharge_qh[t]
         )
     
-        max_discharge_output_by_soc = soc_now * inputs.eta_discharge
+        max_discharge_output_by_soc = max(soc_now - min_soc_mwh, 0.0) * inputs.eta_discharge
     
         if total_discharge_output > max_discharge_output_by_soc + 1e-12:
             scale = max_discharge_output_by_soc / max(total_discharge_output, 1e-12)
@@ -1506,7 +1534,10 @@ def reconcile_wholesale_afrr_dispatch_qh(
             + corrected_afrr_discharge_qh[t]
         ) / max(inputs.eta_discharge, 1e-12)
     
-        combined_soc_qh[t + 1] = soc_now + charge_to_soc - discharge_from_soc
+        combined_soc_qh[t + 1] = min(
+            max(soc_now + charge_to_soc - discharge_from_soc, min_soc_mwh),
+            max_soc_mwh,
+        )
 
     def reshape_sum(arr: np.ndarray) -> np.ndarray:
         return np.asarray(arr, dtype=float).reshape(HOURS_PER_YEAR, QH_PER_HOUR).sum(axis=1)
@@ -1841,6 +1872,8 @@ def build_inputs_dataframe(inputs: SimulationInputs) -> pd.DataFrame:
         ("soc_steps", inputs.soc_steps),
         ("initial_soc_mwh", inputs.initial_soc_mwh),
         ("final_soc_mwh", inputs.final_soc_mwh),
+        ("min_soc_pct", inputs.min_soc_pct),
+        ("max_soc_pct", inputs.max_soc_pct),
         ("grid_export_limit_mw", inputs.grid_export_limit_mw),
         ("cycle_cost_eur_per_mwh", inputs.cycle_cost_eur_per_mwh),
         ("charge_quantile", inputs.charge_quantile),
@@ -1950,7 +1983,7 @@ def app():
         grid_export_limit_mw = st.number_input("Limite injection réseau (MW)", min_value=0.0, value=100.0, step=1.0)
         cycle_cost = st.number_input("Coût de cycle batterie (EUR/MWh)", value=5.0)
         min_spread_arbitrage = st.number_input("Minimum Spread for Arbitrage (EUR/MWh)", min_value=0.0, value=10.0, step=1.0)
-        charge_quantile = st.slider("Quantile charge (%)", 0, 50, 20)
+        charge_quantile = st.slider("Quantile charge (%)", 0, 100, 20)
         discharge_quantile = st.slider("Quantile décharge (%)", 0, 100, 80)
         max_cycles = st.number_input("Cycles max / jour", min_value=0.0, value=1.0, step=0.1)
 
@@ -1964,8 +1997,10 @@ def app():
     with col3:
         nightly_bess_revenue = st.number_input("Revenu services système nuit (EUR/nuit)", min_value=0.0, value=0.0, step=10.0)
         soc_steps = st.slider("Nombre de pas de SOC pour l'optimisation", min_value=21, max_value=201, value=101, step=10)
-        initial_soc = st.number_input("SOC initial batterie (MWh)", min_value=0.0, value=0.0, step=1.0)
-        final_soc = st.number_input("SOC final cible batterie (MWh)", min_value=0.0, value=0.0, step=1.0)
+        initial_soc = st.number_input("SOC initial batterie (MWh)", min_value=0.0, value=20.0, step=1.0)
+        final_soc = st.number_input("SOC final cible batterie (MWh)", min_value=0.0, value=20.0, step=1.0)
+        min_soc_pct = st.slider("Minimum SOC batterie (%)", 0, 100, 20)
+        max_soc_pct = st.slider("Maximum SOC batterie (%)", 0, 100, 90)
         bess_capture_rate_pct = st.number_input("BESS Capture Rate (%)", min_value=0.0, max_value=100.0, value=100.0, step=1.0)
 
     st.subheader("Courbe solaire 8760h")
@@ -2166,6 +2201,31 @@ def app():
             return
         if final_soc > batt_energy_mwh:
             st.error("Le SOC final ne peut pas dépasser la capacité batterie.")
+            return
+        if not (0.0 <= min_soc_pct <= 100.0):
+            st.error("Minimum SOC batterie (%) doit être compris entre 0 et 100 %.")
+            return
+        if not (0.0 <= max_soc_pct <= 100.0):
+            st.error("Maximum SOC batterie (%) doit être compris entre 0 et 100 %.")
+            return
+        if min_soc_pct >= max_soc_pct:
+            st.error("Minimum SOC batterie (%) doit être strictement inférieur au Maximum SOC batterie (%).")
+            return
+
+        min_soc_mwh = batt_energy_mwh * min_soc_pct / 100.0
+        max_soc_mwh = batt_energy_mwh * max_soc_pct / 100.0
+
+        if initial_soc < min_soc_mwh or initial_soc > max_soc_mwh:
+            st.error(
+                f"Le SOC initial doit être compris entre {min_soc_mwh:.2f} MWh "
+                f"et {max_soc_mwh:.2f} MWh."
+            )
+            return
+        if final_soc < min_soc_mwh or final_soc > max_soc_mwh:
+            st.error(
+                f"Le SOC final doit être compris entre {min_soc_mwh:.2f} MWh "
+                f"et {max_soc_mwh:.2f} MWh."
+            )
             return
         if enable_cfd and enable_ppa:
             st.error("CfD et PPA ne peuvent pas être activés en même temps.")
@@ -2387,6 +2447,8 @@ def app():
             soc_steps=soc_steps,
             initial_soc_mwh=initial_soc,
             final_soc_mwh=final_soc,
+            min_soc_pct=min_soc_pct,
+            max_soc_pct=max_soc_pct,
             grid_export_limit_mw=grid_export_limit_mw,
             cycle_cost_eur_per_mwh=cycle_cost,
             charge_quantile=charge_quantile,
@@ -2513,6 +2575,8 @@ def app():
                 initial_soc_mwh=sim_inputs.initial_soc_mwh,
                 eta_charge=sim_inputs.eta_charge,
                 eta_discharge=sim_inputs.eta_discharge,
+                min_soc_pct=sim_inputs.min_soc_pct,
+                max_soc_pct=sim_inputs.max_soc_pct,
             )
 
             combined_qh_df = pd.DataFrame({
@@ -2555,6 +2619,9 @@ def app():
         idx = pd.date_range(f"{DEFAULT_YEAR}-01-01 00:00:00", periods=HOURS_PER_YEAR, freq="h")
         
         # === FIX SOC to include curtailed PV ===
+        min_soc_mwh = sim_inputs.batt_energy_mwh * sim_inputs.min_soc_pct / 100.0
+        max_soc_mwh = sim_inputs.batt_energy_mwh * sim_inputs.max_soc_pct / 100.0
+
         if reconciliation is not None:
             combined_soc_hourly_end = reconciliation["combined_soc_hourly_end_mwh"]
         else:
@@ -2569,7 +2636,7 @@ def app():
             ) / max(sim_inputs.eta_discharge, 1e-12)
         
             soc_hourly = np.zeros(HOURS_PER_YEAR + 1)
-            soc_hourly[0] = sim_inputs.initial_soc_mwh
+            soc_hourly[0] = min(max(sim_inputs.initial_soc_mwh, min_soc_mwh), max_soc_mwh)
         
             for t in range(HOURS_PER_YEAR):
                 soc_hourly[t + 1] = min(
@@ -2577,9 +2644,9 @@ def app():
                         soc_hourly[t]
                         + hourly_charge_to_soc[t]
                         - hourly_discharge_from_soc[t],
-                        0.0,
+                        min_soc_mwh,
                     ),
-                    sim_inputs.batt_energy_mwh,
+                    max_soc_mwh,
                 )
         
             combined_soc_hourly_end = soc_hourly[1:]
