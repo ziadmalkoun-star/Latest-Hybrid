@@ -820,11 +820,19 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
                         grid_charge = max(remaining_after_sellable, 0.0)
                         pv_direct_candidate = pv_sellable_t - sellable_pv_to_batt
 
-                        if grid_charge > 1e-9 and grid_buy_t > charge_threshold_series[t]:
-                            continue
-
-                        if (recoverable_pv_to_batt + sellable_pv_to_batt) < charge_input and (batt_sell_t - grid_buy_t) < inputs.min_spread_arbitrage_eur_per_mwh:
-                            continue
+                        if grid_charge > 1e-9:
+                            if grid_buy_t > charge_threshold_series[t]:
+                                continue
+                        
+                            future_best_sell_price = np.max(batt_sell[t + 1:]) if t + 1 < T else -1e30
+                        
+                            required_future_sell_price = (
+                                grid_buy_t / max(inputs.eta_charge * inputs.eta_discharge, 1e-12)
+                                + inputs.min_spread_arbitrage_eur_per_mwh
+                            )
+                        
+                            if future_best_sell_price < required_future_sell_price:
+                                continue
 
                     elif delta_soc < -1e-12:
                         discharge_candidate = (-delta_soc) * inputs.eta_discharge
