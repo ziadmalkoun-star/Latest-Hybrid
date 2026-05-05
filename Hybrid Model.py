@@ -1981,11 +1981,10 @@ def app():
         pv_dc_mw = st.number_input("Puissance PV DC (MWc)", min_value=0.0, value=100.0, step=1.0)
         productible = st.number_input("Productible PV (kWh/kWc/an)", min_value=0.0, value=1200.0, step=10.0)
         grid_export_limit_mw = st.number_input("Limite injection réseau (MW)", min_value=0.0, value=100.0, step=1.0)
-        cycle_cost = st.number_input("Coût de cycle batterie (EUR/MWh)", value=5.0)
-        min_spread_arbitrage = st.number_input("Minimum Spread for Arbitrage (EUR/MWh)", min_value=0.0, value=10.0, step=1.0)
         charge_quantile = st.slider("Quantile charge (%)", 0, 100, 20)
         discharge_quantile = st.slider("Quantile décharge (%)", 0, 100, 80)
-        max_cycles = st.number_input("Cycles max / jour", min_value=0.0, value=1.0, step=0.1)
+        min_soc_pct = st.slider("Minimum SOC batterie (%)", 0, 100, 20)
+        max_soc_pct = st.slider("Maximum SOC batterie (%)", 0, 100, 90)
 
     with col2:
         pv_losses_pct = st.number_input("Pertes système PV (%)", min_value=0.0, max_value=100.0, value=8.0, step=0.5)
@@ -1999,9 +1998,10 @@ def app():
         soc_steps = st.slider("Nombre de pas de SOC pour l'optimisation", min_value=21, max_value=201, value=51, step=10)
         initial_soc = st.number_input("SOC initial batterie (MWh)", min_value=0.0, value=batt_energy_mwh*min_soc_pct, step=1.0)
         final_soc = st.number_input("SOC final cible batterie (MWh)", min_value=0.0, value=60.0, step=1.0)
-        min_soc_pct = st.slider("Minimum SOC batterie (%)", 0, 100, 20)
-        max_soc_pct = st.slider("Maximum SOC batterie (%)", 0, 100, 90)
         bess_capture_rate_pct = st.number_input("BESS Capture Rate (%)", min_value=0.0, max_value=100.0, value=100.0, step=1.0)
+        max_cycles = st.number_input("Cycles max / jour", min_value=0.0, value=1.0, step=0.1)
+        cycle_cost = st.number_input("Coût de cycle batterie (EUR/MWh)", value=5.0)
+        min_spread_arbitrage = st.number_input("Minimum Spread for Arbitrage (EUR/MWh)", min_value=0.0, value=10.0, step=1.0)
 
     st.subheader("Courbe solaire 8760h")
     solar_mode = st.radio("Source du profil solaire", ["Courbe standard France", "Upload CSV 8760"], horizontal=True)
