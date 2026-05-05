@@ -2118,7 +2118,7 @@ def app():
         initial_soc = st.number_input("SOC initial batterie (MWh)", min_value=0.0, value=batt_energy_mwh*max_soc_pct/100, step=1.0)
         final_soc = st.number_input("SOC final cible batterie (MWh)", min_value=0.0, value=batt_energy_mwh*min_soc_pct/100, step=1.0)
         bess_capture_rate_pct = st.number_input("BESS Capture Rate (%)", min_value=0.0, max_value=100.0, value=100.0, step=1.0)
-        max_cycles_per_year = st.number_input("Cycles max / an", min_value=0.0, value=1.0, step=0.1)
+        max_cycles_per_year = st.number_input("Cycles max / an", min_value=0.0, value=547.0, step=0.1)
         cycle_cost = st.number_input("Coût de cycle batterie (EUR/MWh)", value=5.0)
         min_spread_arbitrage = st.number_input("Minimum Spread for Arbitrage (EUR/MWh)", min_value=0.0, value=10.0, step=1.0)
 
