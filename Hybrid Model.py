@@ -2110,6 +2110,7 @@ def app():
         bess_capture_rate_pct = st.number_input("BESS Capture Rate (%)", min_value=0.0, max_value=100.0, value=100.0, step=1.0)
         max_cycles_per_year = st.number_input("Max Cycles / year", min_value=0.0, value=547.0, step=0.1)
         cycle_cost = st.number_input("BESS Cycle Cost (EUR/MWh)", value=5.0)
+        min_spread_arbitrage = st.number_input("Minimum Spread for Arbitrage (EUR/MWh)", min_value=0.0, value=10.0, step=1.0)
         nightly_bess_revenue = st.number_input("Ancillary Services Revenues (EUR/nuit)", min_value=0.0, value=0.0, step=10.0)
         
     with col2:
@@ -2122,7 +2123,6 @@ def app():
         project_lifetime_years = int(st.number_input("Project Lifetime (years)", min_value=1, value=1, step=1))
         availability_pct = st.number_input("Power Plant Availability (%)", min_value=0.0, max_value=100.0, value=98.0, step=0.1)
         grid_export_limit_mw = st.number_input("Grid Injection Limit (MW)", min_value=0.0, value=100.0, step=1.0)
-        min_spread_arbitrage = st.number_input("Minimum Spread for Arbitrage (EUR/MWh)", min_value=0.0, value=10.0, step=1.0)
         soc_steps = st.slider("SOC Steps for Optimization", min_value=21, max_value=201, value=51, step=10)
 
     bess_degradation_upload = st.file_uploader(
@@ -2130,7 +2130,6 @@ def app():
             type=["xlsx", "xls", "csv"],
             key="bess_degradation_curve",
         )
-
 
     st.subheader("PV Commercial Structure")
 
