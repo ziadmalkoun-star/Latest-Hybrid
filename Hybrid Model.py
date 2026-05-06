@@ -2097,33 +2097,33 @@ def app():
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        batt_power_mw = st.number_input("Puissance batterie utile (MW)", min_value=0.0, value=50.0, step=1.0)
-        batt_energy_mwh = st.number_input("Capacité batterie utile (MWh)", min_value=0.0, value=200.0, step=1.0)
-        pv_dc_mw = st.number_input("Puissance PV DC (MWc)", min_value=0.0, value=100.0, step=1.0)
-        productible = st.number_input("Productible PV (kWh/kWc/an)", min_value=0.0, value=1200.0, step=10.0)
-        grid_export_limit_mw = st.number_input("Limite injection réseau (MW)", min_value=0.0, value=100.0, step=1.0)
-        project_lifetime_years = int(st.number_input("Project Lifetime (years)", min_value=1, value=1, step=1))
-        charge_quantile = st.slider("Quantile charge (%)", 0, 100, 20)
-        discharge_quantile = st.slider("Quantile décharge (%)", 0, 100, 80)
-        min_soc_pct = st.slider("Minimum SOC batterie (%)", 0, 100, 20)
-        max_soc_pct = st.slider("Maximum SOC batterie (%)", 0, 100, 90)
-
-    with col2:
-        pv_losses_pct = st.number_input("Pertes système PV (%)", min_value=0.0, max_value=100.0, value=8.0, step=0.5)
-        availability_pct = st.number_input("Disponibilité globale centrale (%)", min_value=0.0, max_value=100.0, value=98.0, step=0.1)
-        eta_charge = st.number_input("Rendement de charge batterie (%)", min_value=1.0, max_value=100.0, value=95.0, step=0.5) / 100.0
-        eta_discharge = st.number_input("Rendement de décharge batterie (%)", min_value=1.0, max_value=100.0, value=95.0, step=0.5) / 100.0
-        pv_capture_rate_pct = st.number_input("PV Capture Rate (%)", min_value=0.0, max_value=100.0, value=100.0, step=1.0)
-
-    with col3:
-        nightly_bess_revenue = st.number_input("Revenu services système nuit (EUR/nuit)", min_value=0.0, value=0.0, step=10.0)
-        soc_steps = st.slider("Nombre de pas de SOC pour l'optimisation", min_value=21, max_value=201, value=51, step=10)
-        initial_soc = st.number_input("SOC initial batterie (MWh)", min_value=0.0, value=batt_energy_mwh*max_soc_pct/100, step=1.0)
-        final_soc = st.number_input("SOC final cible batterie (MWh)", min_value=0.0, value=batt_energy_mwh*min_soc_pct/100, step=1.0)
+        batt_power_mw = st.number_input("BESS Usable Power (MW)", min_value=0.0, value=50.0, step=1.0)
+        batt_energy_mwh = st.number_input("BESS Usable Capacity (MWh)", min_value=0.0, value=200.0, step=1.0)
+        eta_charge = st.number_input("BESS Charging Efficiency (%)", min_value=1.0, max_value=100.0, value=95.0, step=0.5) / 100.0
+        eta_discharge = st.number_input("BESS Discharging Efficiency (%)", min_value=1.0, max_value=100.0, value=95.0, step=0.5) / 100.0
+        initial_soc = st.number_input("BESS BoL SOC (MWh)", min_value=0.0, value=batt_energy_mwh*max_soc_pct/100, step=1.0)
+        final_soc = st.number_input("BESS EoL SOC (MWh)", min_value=0.0, value=batt_energy_mwh*min_soc_pct/100, step=1.0)
         bess_capture_rate_pct = st.number_input("BESS Capture Rate (%)", min_value=0.0, max_value=100.0, value=100.0, step=1.0)
-        max_cycles_per_year = st.number_input("Cycles max / an", min_value=0.0, value=547.0, step=0.1)
-        cycle_cost = st.number_input("Coût de cycle batterie (EUR/MWh)", value=5.0)
+        max_cycles_per_year = st.number_input("Max Cycles / year", min_value=0.0, value=547.0, step=0.1)
+        cycle_cost = st.number_input("BESS Cycle Cost (EUR/MWh)", value=5.0)
+        nightly_bess_revenue = st.number_input("Ancillary Services Revenues (EUR/nuit)", min_value=0.0, value=0.0, step=10.0)
+        
+    with col2:
+        pv_dc_mw = st.number_input("PV DC Power (MWc)", min_value=0.0, value=100.0, step=1.0)
+        productible = st.number_input("PV Yield (kWh/kWc/an)", min_value=0.0, value=1200.0, step=10.0)
+        pv_losses_pct = st.number_input("PV System Losses (%)", min_value=0.0, max_value=100.0, value=8.0, step=0.5)
+        pv_capture_rate_pct = st.number_input("PV Capture Rate (%)", min_value=0.0, max_value=100.0, value=100.0, step=1.0)
+        
+    with col3:
+        project_lifetime_years = int(st.number_input("Project Lifetime (years)", min_value=1, value=1, step=1))
+        availability_pct = st.number_input("Power Plant Availability (%)", min_value=0.0, max_value=100.0, value=98.0, step=0.1)
+        grid_export_limit_mw = st.number_input("Grid Injection Limit (MW)", min_value=0.0, value=100.0, step=1.0)
         min_spread_arbitrage = st.number_input("Minimum Spread for Arbitrage (EUR/MWh)", min_value=0.0, value=10.0, step=1.0)
+        soc_steps = st.slider("SOC Steps for Optimization", min_value=21, max_value=201, value=51, step=10)
+        charge_quantile = st.slider("Charge Percentile (%)", 0, 100, 20)
+        discharge_quantile = st.slider("Discharge Percentile (%)", 0, 100, 80)
+        min_soc_pct = st.slider("BESS Minimum SOC (%)", 0, 100, 20)
+        max_soc_pct = st.slider("BESS Maximum SOC (%)", 0, 100, 90)
 
     bess_degradation_upload = st.file_uploader(
             "BESS Degradation Curve",
