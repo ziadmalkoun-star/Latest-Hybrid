@@ -3092,11 +3092,29 @@ def app():
                 float(final_result["total_afrr_capacity_revenue_eur"][0]) if "total_afrr_capacity_revenue_eur" in final_result else 0.0,
                 float(pure_pv_benchmark["total_pv_only_revenue_eur"][0]),
             ]
-            labels = ["PV direct", "Vente batterie", "Coût charge réseau", "SS nuit", "aFRR net", "aFRR Capacity", "PV-only"]
+        
+            labels = [
+                "PV direct",
+                "Vente batterie",
+                "Coût charge réseau",
+                "SS nuit",
+                "aFRR Energy",
+                "aFRR Capacity",
+                "PV-only",
+            ]
+        
             ax1.bar(labels, bars)
+        
+            # Thin horizontal zero line
+            ax1.axhline(0, linewidth=0.8, color="black")
+        
+            # Remove scientific notation / 1e6 offset on y-axis
+            ax1.ticklabel_format(axis="y", style="plain", useOffset=False)
+        
             ax1.set_title("Revenue Breakdown")
-            ax1.set_ylabel("million €")
+            ax1.set_ylabel("EUR")
             ax1.tick_params(axis="x", rotation=20)
+        
             st.pyplot(fig1)
             plt.close(fig1)
 
