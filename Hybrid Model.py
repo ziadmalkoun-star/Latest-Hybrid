@@ -66,6 +66,8 @@ class SimulationInputs:
     afrr_night_end_hour: int = 8
     afrr_pv_zero_tolerance_mwh: float = PV_ZERO_TOLERANCE_MWH
     afrr_n_qh_per_side: int = 4
+    afrr_energy_down_activation_pct: float = 100.0
+    afrr_energy_up_activation_pct: float = 100.0
 
     # aFRR Capacity inputs
     enable_afrr_capacity: bool = False
@@ -1246,6 +1248,104 @@ def select_best_daily_afrr_trade_blocks(
     return best
 
 
+def _select_hourly_activation_by_pct(
+    awarded_mask_h: np.ndarray,
+    price_h: np.ndarray,
+    activation_pct: float,
+    prefer: str,
+) -> np.ndarray:
+    """Deterministically select awarded Capacity hours for aFRR Energy activation."""
+    awarded_idx = np.where(np.asarray(awarded_mask_h, dtype=bool))[0]
+    selected = np.zeros(HOURS_PER_YEAR, dtype=int)
+    if len(awarded_idx) == 0:
+        return selected
+
+    pct = min(max(float(activation_pct), 0.0), 100.0)
+    n_select = int(np.floor(len(awarded_idx) * pct / 100.0 + 0.5))
+    n_select = min(max(n_select, 0), len(awarded_idx))
+    if n_select == 0:
+        return selected
+
+    prices = np.asarray(price_h, dtype=float)[awarded_idx]
+    if prefer == "low":
+        order = np.lexsort((awarded_idx, prices))
+    elif prefer == "high":
+        order = np.lexsort((awarded_idx, -prices))
+    else:
+        raise ValueError("prefer must be 'low' or 'high'.")
+
+    chosen = awarded_idx[order[:n_select]]
+    selected[chosen] = 1
+    return selected
+
+
+def _select_best_daily_afrr_competing_blocks(
+    charge_prices_day: np.ndarray,
+    discharge_prices_day: np.ndarray,
+    grid_buy_prices_day: np.ndarray,
+    batt_sell_prices_day: np.ndarray,
+    eligible_mask_day: np.ndarray,
+    eta_charge: float,
+    eta_discharge: float,
+    afrr_cycle_cost_eur_per_mwh: float,
+    afrr_min_spread_eur_per_mwh: float,
+    n_qh: int,
+) -> Dict[str, object]:
+    """Mode 2 candidate selection: aFRR competes with wholesale routes on eligible QHs."""
+    eligible = np.asarray(eligible_mask_day, dtype=bool)
+    charge_candidate = np.where(eligible & (charge_prices_day < grid_buy_prices_day))[0]
+    discharge_candidate = np.where(eligible & (discharge_prices_day > batt_sell_prices_day))[0]
+
+    best = {
+        "execute": False,
+        "charge_indices": [],
+        "discharge_indices": [],
+        "avg_charge_price": np.nan,
+        "avg_discharge_price": np.nan,
+        "expected_net_spread_eur_per_mwh": np.nan,
+        "reason": "Aucune combinaison aFRR meilleure que wholesale.",
+    }
+
+    if len(charge_candidate) < n_qh or len(discharge_candidate) < n_qh:
+        return best
+
+    eligible_idx = np.where(eligible)[0]
+    for split_abs in eligible_idx:
+        charge_pool = charge_candidate[charge_candidate < split_abs]
+        discharge_pool = discharge_candidate[discharge_candidate > split_abs]
+        if len(charge_pool) < n_qh or len(discharge_pool) < n_qh:
+            continue
+
+        selected_charge = np.sort(charge_pool[np.argsort(charge_prices_day[charge_pool])[:n_qh]])
+        selected_discharge = np.sort(discharge_pool[np.argsort(-discharge_prices_day[discharge_pool])[:n_qh]])
+        if selected_charge.max() >= selected_discharge.min():
+            continue
+
+        avg_charge_price = float(np.mean(charge_prices_day[selected_charge]))
+        avg_discharge_price = float(np.mean(discharge_prices_day[selected_discharge]))
+        net_spread = (
+            avg_discharge_price
+            - avg_charge_price / max(eta_charge * eta_discharge, 1e-12)
+            - afrr_cycle_cost_eur_per_mwh
+        )
+
+        if (not np.isfinite(best["expected_net_spread_eur_per_mwh"])) or net_spread > best["expected_net_spread_eur_per_mwh"]:
+            best = {
+                "execute": net_spread >= afrr_min_spread_eur_per_mwh,
+                "charge_indices": selected_charge.tolist(),
+                "discharge_indices": selected_discharge.tolist(),
+                "avg_charge_price": avg_charge_price,
+                "avg_discharge_price": avg_discharge_price,
+                "expected_net_spread_eur_per_mwh": float(net_spread),
+                "reason": "OK" if net_spread >= afrr_min_spread_eur_per_mwh else "Spread insuffisant.",
+            }
+
+    if not best["execute"]:
+        best["charge_indices"] = []
+        best["discharge_indices"] = []
+    return best
+
+
 def simulate_afrr_night_arbitrage(inputs: SimulationInputs, result_hourly: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
     if not inputs.enable_afrr:
         return {
@@ -1256,6 +1356,10 @@ def simulate_afrr_night_arbitrage(inputs: SimulationInputs, result_hourly: Dict[
             "afrr_sale_revenue_qh_eur": np.zeros(QH_PER_YEAR, dtype=float),
             "afrr_cycle_cost_qh_eur": np.zeros(QH_PER_YEAR, dtype=float),
             "afrr_net_revenue_qh_eur": np.zeros(QH_PER_YEAR, dtype=float),
+            "afrr_energy_down_activated_qh": np.zeros(QH_PER_YEAR, dtype=int),
+            "afrr_energy_up_activated_qh": np.zeros(QH_PER_YEAR, dtype=int),
+            "selected_charge_market_qh": np.full(QH_PER_YEAR, "none", dtype=object),
+            "selected_discharge_market_qh": np.full(QH_PER_YEAR, "none", dtype=object),
             "afrr_daily_log": pd.DataFrame(),
         }
 
@@ -1264,10 +1368,12 @@ def simulate_afrr_night_arbitrage(inputs: SimulationInputs, result_hourly: Dict[
 
     charge_prices_qh = _validate_array_length(inputs.afrr_charge_price_qh, "Prix aFRR charge", QH_PER_YEAR)
     discharge_prices_qh = _validate_array_length(inputs.afrr_discharge_price_qh, "Prix aFRR décharge", QH_PER_YEAR)
+    grid_buy_price_qh = np.repeat(_validate_array_length(inputs.grid_buy_price, "Prix achat réseau BESS", HOURS_PER_YEAR), QH_PER_HOUR)
+    batt_sell_price_qh = np.repeat(_validate_array_length(inputs.batt_sell_price, "Prix vente BESS", HOURS_PER_YEAR), QH_PER_HOUR)
 
     idx_qh = build_quarter_hour_index(DEFAULT_YEAR)
     pv_hourly = _validate_array_length(inputs.solar_profile, "Production PV nette horaire", HOURS_PER_YEAR)
-    pv_qh = repeat_hourly_to_qh(pv_hourly / 4.0)
+    pv_qh = repeat_hourly_to_qh(pv_hourly / QH_PER_HOUR)
 
     night_mask_qh = build_night_mask_qh(idx_qh, inputs.afrr_night_start_hour, inputs.afrr_night_end_hour)
     no_pv_mask_qh = pv_qh <= float(inputs.afrr_pv_zero_tolerance_mwh)
@@ -1280,155 +1386,186 @@ def simulate_afrr_night_arbitrage(inputs: SimulationInputs, result_hourly: Dict[
     afrr_cycle_cost_qh_eur = np.zeros(QH_PER_YEAR, dtype=float)
     afrr_net_revenue_qh_eur = np.zeros(QH_PER_YEAR, dtype=float)
     afrr_soc_qh = np.zeros(QH_PER_YEAR, dtype=float)
+    down_activated_qh = np.zeros(QH_PER_YEAR, dtype=int)
+    up_activated_qh = np.zeros(QH_PER_YEAR, dtype=int)
+    selected_charge_market_qh = np.full(QH_PER_YEAR, "none", dtype=object)
+    selected_discharge_market_qh = np.full(QH_PER_YEAR, "none", dtype=object)
 
-    daily_logs = []
     min_soc_mwh = inputs.batt_energy_mwh * inputs.min_soc_pct / 100.0
     max_soc_mwh = inputs.batt_energy_mwh * inputs.max_soc_pct / 100.0
     soc_current = min(max(float(result_hourly["soc"][0]), min_soc_mwh), max_soc_mwh)
+    max_charge_input_qh = inputs.batt_power_mw * QH_DT_HOURS
+    max_discharge_output_qh = inputs.batt_power_mw * QH_DT_HOURS
+    max_export_qh = inputs.grid_export_limit_mw * QH_DT_HOURS
 
-    df = pd.DataFrame({
-        "datetime": idx_qh,
-        "charge_price": charge_prices_qh,
-        "discharge_price": discharge_prices_qh,
-        "eligible": eligible_mask_qh,
-        "pv_qh_mwh": pv_qh,
-    })
-    df["day"] = df["datetime"].dt.date
+    daily_logs = []
 
-    limits = _afrr_qh_limits(inputs.batt_power_mw, inputs.eta_charge, inputs.eta_discharge, QH_DT_HOURS)
-
-    for day, group in df.groupby("day", sort=True):
-        group_idx = group.index.to_numpy()
-        charge_day = group["charge_price"].to_numpy(dtype=float)
-        discharge_day = group["discharge_price"].to_numpy(dtype=float)
-        eligible_day = group["eligible"].to_numpy(dtype=bool)
-
-        best_trade = select_best_daily_afrr_trade_blocks(
-            charge_prices_day=charge_day,
-            discharge_prices_day=discharge_day,
-            eligible_mask_day=eligible_day,
-            batt_power_mw=inputs.batt_power_mw,
-            batt_energy_mwh=inputs.batt_energy_mwh,
-            eta_charge=inputs.eta_charge,
-            eta_discharge=inputs.eta_discharge,
-            afrr_cycle_cost_eur_per_mwh=inputs.afrr_cycle_cost_eur_per_mwh,
-            afrr_min_spread_eur_per_mwh=inputs.afrr_min_spread_eur_per_mwh,
-            n_qh=inputs.afrr_n_qh_per_side,
-            dt_hours=QH_DT_HOURS,
-        )
-
-        soc_day_start = soc_current
-        day_charge_qh_mwh = np.zeros(len(group_idx), dtype=float)
-        day_discharge_qh_mwh = np.zeros(len(group_idx), dtype=float)
-        day_charge_cost_qh_eur = np.zeros(len(group_idx), dtype=float)
-        day_sale_revenue_qh_eur = np.zeros(len(group_idx), dtype=float)
-        day_cycle_cost_qh_eur = np.zeros(len(group_idx), dtype=float)
-        day_net_revenue_qh_eur = np.zeros(len(group_idx), dtype=float)
-        day_soc_trace = np.full(len(group_idx), soc_day_start, dtype=float)
-
-        executed = False
-        selected_charge_abs_idx = []
-        selected_discharge_abs_idx = []
-
-        charged_input_mwh_total = 0.0
-        charged_stored_mwh_total = 0.0
-        discharged_mwh_total = 0.0
-        charge_cost_eur_total = 0.0
-        sale_revenue_eur_total = 0.0
-        cycle_cost_eur_total = 0.0
-        net_revenue_eur_total = 0.0
-
-        if best_trade["execute"]:
-            charge_rel_indices = [int(i) for i in best_trade["charge_indices"]]
-            discharge_rel_indices = [int(i) for i in best_trade["discharge_indices"]]
-
-            selected_charge_abs_idx = [int(group_idx[i]) for i in charge_rel_indices]
-            selected_discharge_abs_idx = [int(group_idx[i]) for i in discharge_rel_indices]
-
-            soc_working = soc_day_start
-
-            for rel_idx in charge_rel_indices:
-                available_capacity_mwh = max(max_soc_mwh - soc_working, 0.0)
-                stored_this_qh = min(limits["stored_per_qh_mwh"], available_capacity_mwh)
-                if stored_this_qh <= 1e-9:
-                    continue
-
-                input_this_qh = stored_this_qh / max(inputs.eta_charge, 1e-12)
-                day_charge_qh_mwh[rel_idx] = input_this_qh
-                day_charge_cost_qh_eur[rel_idx] = input_this_qh * charge_day[rel_idx]
-                day_net_revenue_qh_eur[rel_idx] -= day_charge_cost_qh_eur[rel_idx]
-
-                charged_input_mwh_total += input_this_qh
-                charged_stored_mwh_total += stored_this_qh
-                charge_cost_eur_total += day_charge_cost_qh_eur[rel_idx]
-
-                soc_working += stored_this_qh
-                soc_working = min(max(soc_working, min_soc_mwh), max_soc_mwh)
-                day_soc_trace[rel_idx:] = soc_working
-
-            for rel_idx in discharge_rel_indices:
-                max_output_by_power = limits["output_per_qh_mwh"]
-                max_output_by_export = inputs.grid_export_limit_mw * QH_DT_HOURS
-                max_output_by_soc = max(soc_working - min_soc_mwh, 0.0) * inputs.eta_discharge
-
-                discharge_this_qh = min(max_output_by_power, max_output_by_export, max_output_by_soc)
-                if discharge_this_qh <= 1e-9:
-                    continue
-
-                soc_removed_this_qh = discharge_this_qh / max(inputs.eta_discharge, 1e-12)
-
-                day_discharge_qh_mwh[rel_idx] = discharge_this_qh
-                day_sale_revenue_qh_eur[rel_idx] = discharge_this_qh * discharge_day[rel_idx]
-                day_cycle_cost_qh_eur[rel_idx] = soc_removed_this_qh * inputs.afrr_cycle_cost_eur_per_mwh
-                day_net_revenue_qh_eur[rel_idx] += day_sale_revenue_qh_eur[rel_idx] - day_cycle_cost_qh_eur[rel_idx]
-
-                discharged_mwh_total += discharge_this_qh
-                sale_revenue_eur_total += day_sale_revenue_qh_eur[rel_idx]
-                cycle_cost_eur_total += day_cycle_cost_qh_eur[rel_idx]
-
-                soc_working -= soc_removed_this_qh
-                soc_working = min(max(soc_working, min_soc_mwh), max_soc_mwh)
-                day_soc_trace[rel_idx:] = soc_working
-
-            net_revenue_eur_total = sale_revenue_eur_total - charge_cost_eur_total - cycle_cost_eur_total
-
-            if charged_input_mwh_total > 1e-9 and discharged_mwh_total > 1e-9 and net_revenue_eur_total >= 0.0:
-                executed = True
-                soc_current = soc_working
-
-                afrr_charge_qh_mwh[group_idx] = day_charge_qh_mwh
-                afrr_discharge_qh_mwh[group_idx] = day_discharge_qh_mwh
-                afrr_charge_cost_qh_eur[group_idx] = day_charge_cost_qh_eur
-                afrr_sale_revenue_qh_eur[group_idx] = day_sale_revenue_qh_eur
-                afrr_cycle_cost_qh_eur[group_idx] = day_cycle_cost_qh_eur
-                afrr_net_revenue_qh_eur[group_idx] = day_net_revenue_qh_eur
-                afrr_soc_qh[group_idx] = day_soc_trace
-            else:
-                afrr_soc_qh[group_idx] = soc_day_start
-                selected_charge_abs_idx = []
-                selected_discharge_abs_idx = []
+    if inputs.enable_afrr_capacity:
+        if inputs.afrr_capacity_selected_market_h is None:
+            capacity_selected_h = np.full(HOURS_PER_YEAR, "none", dtype=object)
         else:
-            afrr_soc_qh[group_idx] = soc_day_start
+            capacity_selected_h = np.asarray(inputs.afrr_capacity_selected_market_h, dtype=object).reshape(-1)
+            if len(capacity_selected_h) != HOURS_PER_YEAR:
+                raise ValueError("La courbe de sélection aFRR Capacity doit contenir 8760 heures.")
+
+        charge_price_h = charge_prices_qh.reshape(HOURS_PER_YEAR, QH_PER_HOUR).mean(axis=1)
+        discharge_price_h = discharge_prices_qh.reshape(HOURS_PER_YEAR, QH_PER_HOUR).mean(axis=1)
+        down_selected_h = _select_hourly_activation_by_pct(
+            capacity_selected_h == "down",
+            charge_price_h,
+            inputs.afrr_energy_down_activation_pct,
+            prefer="low",
+        )
+        up_selected_h = _select_hourly_activation_by_pct(
+            capacity_selected_h == "up",
+            discharge_price_h,
+            inputs.afrr_energy_up_activation_pct,
+            prefer="high",
+        )
+        down_selected_qh = np.repeat(down_selected_h, QH_PER_HOUR).astype(bool)
+        up_selected_qh = np.repeat(up_selected_h, QH_PER_HOUR).astype(bool)
+
+        for t in range(QH_PER_YEAR):
+            if down_selected_qh[t]:
+                input_this_qh = min(max_charge_input_qh, max(max_soc_mwh - soc_current, 0.0) / max(inputs.eta_charge, 1e-12))
+                if input_this_qh > 1e-12:
+                    afrr_charge_qh_mwh[t] = input_this_qh
+                    afrr_charge_cost_qh_eur[t] = input_this_qh * charge_prices_qh[t]
+                    afrr_net_revenue_qh_eur[t] -= afrr_charge_cost_qh_eur[t]
+                    soc_current += input_this_qh * inputs.eta_charge
+                    down_activated_qh[t] = 1
+                    selected_charge_market_qh[t] = "afrr"
+            elif up_selected_qh[t]:
+                discharge_this_qh = min(
+                    max_discharge_output_qh,
+                    max_export_qh,
+                    max(soc_current - min_soc_mwh, 0.0) * inputs.eta_discharge,
+                )
+                if discharge_this_qh > 1e-12:
+                    soc_removed = discharge_this_qh / max(inputs.eta_discharge, 1e-12)
+                    afrr_discharge_qh_mwh[t] = discharge_this_qh
+                    afrr_sale_revenue_qh_eur[t] = discharge_this_qh * discharge_prices_qh[t]
+                    afrr_cycle_cost_qh_eur[t] = soc_removed * inputs.afrr_cycle_cost_eur_per_mwh
+                    afrr_net_revenue_qh_eur[t] += afrr_sale_revenue_qh_eur[t] - afrr_cycle_cost_qh_eur[t]
+                    soc_current -= soc_removed
+                    up_activated_qh[t] = 1
+                    selected_discharge_market_qh[t] = "afrr"
+
+            soc_current = min(max(soc_current, min_soc_mwh), max_soc_mwh)
+            afrr_soc_qh[t] = soc_current
 
         daily_logs.append({
-            "day": pd.to_datetime(day),
-            "executed": executed,
-            "charge_qh_indices": selected_charge_abs_idx,
-            "discharge_qh_indices": selected_discharge_abs_idx,
-            "charge_times": [idx_qh[i] for i in selected_charge_abs_idx],
-            "discharge_times": [idx_qh[i] for i in selected_discharge_abs_idx],
-            "avg_charge_price_eur_per_mwh": best_trade.get("avg_charge_price", np.nan),
-            "avg_discharge_price_eur_per_mwh": best_trade.get("avg_discharge_price", np.nan),
-            "expected_net_spread_eur_per_mwh": best_trade.get("expected_net_spread_eur_per_mwh", np.nan),
-            "charged_input_mwh": charged_input_mwh_total,
-            "charged_stored_mwh": charged_stored_mwh_total,
-            "discharged_mwh": discharged_mwh_total,
-            "charge_cost_eur": charge_cost_eur_total,
-            "sale_revenue_eur": sale_revenue_eur_total,
-            "cycle_cost_eur": cycle_cost_eur_total,
-            "net_revenue_eur": net_revenue_eur_total,
-            "reason": best_trade.get("reason", "OK"),
+            "day": pd.NaT,
+            "mode": "capacity_activated",
+            "executed": bool(down_activated_qh.any() or up_activated_qh.any()),
+            "down_activation_pct": inputs.afrr_energy_down_activation_pct,
+            "up_activation_pct": inputs.afrr_energy_up_activation_pct,
+            "down_awarded_hours": int(np.sum(capacity_selected_h == "down")),
+            "up_awarded_hours": int(np.sum(capacity_selected_h == "up")),
+            "down_activated_hours": int(np.sum(down_selected_h)),
+            "up_activated_hours": int(np.sum(up_selected_h)),
+            "charge_cost_eur": float(afrr_charge_cost_qh_eur.sum()),
+            "sale_revenue_eur": float(afrr_sale_revenue_qh_eur.sum()),
+            "cycle_cost_eur": float(afrr_cycle_cost_qh_eur.sum()),
+            "net_revenue_eur": float(afrr_net_revenue_qh_eur.sum()),
+            "reason": "Capacity directional activation; no minimum spread applied.",
         })
+
+    else:
+        df = pd.DataFrame({
+            "datetime": idx_qh,
+            "charge_price": charge_prices_qh,
+            "discharge_price": discharge_prices_qh,
+            "grid_buy_price": grid_buy_price_qh,
+            "batt_sell_price": batt_sell_price_qh,
+            "eligible": eligible_mask_qh,
+        })
+        df["day"] = df["datetime"].dt.date
+
+        for day, group in df.groupby("day", sort=True):
+            group_idx = group.index.to_numpy()
+            best_trade = _select_best_daily_afrr_competing_blocks(
+                charge_prices_day=group["charge_price"].to_numpy(dtype=float),
+                discharge_prices_day=group["discharge_price"].to_numpy(dtype=float),
+                grid_buy_prices_day=group["grid_buy_price"].to_numpy(dtype=float),
+                batt_sell_prices_day=group["batt_sell_price"].to_numpy(dtype=float),
+                eligible_mask_day=group["eligible"].to_numpy(dtype=bool),
+                eta_charge=inputs.eta_charge,
+                eta_discharge=inputs.eta_discharge,
+                afrr_cycle_cost_eur_per_mwh=inputs.afrr_cycle_cost_eur_per_mwh,
+                afrr_min_spread_eur_per_mwh=inputs.afrr_min_spread_eur_per_mwh,
+                n_qh=int(inputs.afrr_n_qh_per_side),
+            )
+
+            selected_charge_abs_idx = []
+            selected_discharge_abs_idx = []
+            charged_input_mwh_total = 0.0
+            discharged_mwh_total = 0.0
+            charge_cost_eur_total = 0.0
+            sale_revenue_eur_total = 0.0
+            cycle_cost_eur_total = 0.0
+
+            if best_trade["execute"]:
+                for rel_idx in [int(i) for i in best_trade["charge_indices"]]:
+                    t = int(group_idx[rel_idx])
+                    input_this_qh = min(max_charge_input_qh, max(max_soc_mwh - soc_current, 0.0) / max(inputs.eta_charge, 1e-12))
+                    if input_this_qh <= 1e-12:
+                        continue
+                    afrr_charge_qh_mwh[t] = input_this_qh
+                    afrr_charge_cost_qh_eur[t] = input_this_qh * charge_prices_qh[t]
+                    afrr_net_revenue_qh_eur[t] -= afrr_charge_cost_qh_eur[t]
+                    soc_current += input_this_qh * inputs.eta_charge
+                    down_activated_qh[t] = 1
+                    selected_charge_market_qh[t] = "afrr"
+                    selected_charge_abs_idx.append(t)
+                    charged_input_mwh_total += input_this_qh
+                    charge_cost_eur_total += afrr_charge_cost_qh_eur[t]
+                    afrr_soc_qh[t] = soc_current
+
+                for rel_idx in [int(i) for i in best_trade["discharge_indices"]]:
+                    t = int(group_idx[rel_idx])
+                    discharge_this_qh = min(
+                        max_discharge_output_qh,
+                        max_export_qh,
+                        max(soc_current - min_soc_mwh, 0.0) * inputs.eta_discharge,
+                    )
+                    if discharge_this_qh <= 1e-12:
+                        continue
+                    soc_removed = discharge_this_qh / max(inputs.eta_discharge, 1e-12)
+                    afrr_discharge_qh_mwh[t] = discharge_this_qh
+                    afrr_sale_revenue_qh_eur[t] = discharge_this_qh * discharge_prices_qh[t]
+                    afrr_cycle_cost_qh_eur[t] = soc_removed * inputs.afrr_cycle_cost_eur_per_mwh
+                    afrr_net_revenue_qh_eur[t] += afrr_sale_revenue_qh_eur[t] - afrr_cycle_cost_qh_eur[t]
+                    soc_current -= soc_removed
+                    up_activated_qh[t] = 1
+                    selected_discharge_market_qh[t] = "afrr"
+                    selected_discharge_abs_idx.append(t)
+                    discharged_mwh_total += discharge_this_qh
+                    sale_revenue_eur_total += afrr_sale_revenue_qh_eur[t]
+                    cycle_cost_eur_total += afrr_cycle_cost_qh_eur[t]
+                    afrr_soc_qh[t] = soc_current
+
+            group_soc_missing = afrr_soc_qh[group_idx] == 0.0
+            afrr_soc_qh[group_idx[group_soc_missing]] = soc_current
+            daily_logs.append({
+                "day": pd.to_datetime(day),
+                "mode": "merchant_competing_routes",
+                "executed": bool(len(selected_charge_abs_idx) or len(selected_discharge_abs_idx)),
+                "charge_qh_indices": selected_charge_abs_idx,
+                "discharge_qh_indices": selected_discharge_abs_idx,
+                "charge_times": [idx_qh[i] for i in selected_charge_abs_idx],
+                "discharge_times": [idx_qh[i] for i in selected_discharge_abs_idx],
+                "avg_charge_price_eur_per_mwh": best_trade.get("avg_charge_price", np.nan),
+                "avg_discharge_price_eur_per_mwh": best_trade.get("avg_discharge_price", np.nan),
+                "expected_net_spread_eur_per_mwh": best_trade.get("expected_net_spread_eur_per_mwh", np.nan),
+                "charged_input_mwh": charged_input_mwh_total,
+                "discharged_mwh": discharged_mwh_total,
+                "charge_cost_eur": charge_cost_eur_total,
+                "sale_revenue_eur": sale_revenue_eur_total,
+                "cycle_cost_eur": cycle_cost_eur_total,
+                "net_revenue_eur": sale_revenue_eur_total - charge_cost_eur_total - cycle_cost_eur_total,
+                "reason": best_trade.get("reason", "OK"),
+            })
 
     return {
         "afrr_charge_qh_mwh": afrr_charge_qh_mwh,
@@ -1438,6 +1575,10 @@ def simulate_afrr_night_arbitrage(inputs: SimulationInputs, result_hourly: Dict[
         "afrr_sale_revenue_qh_eur": afrr_sale_revenue_qh_eur,
         "afrr_cycle_cost_qh_eur": afrr_cycle_cost_qh_eur,
         "afrr_net_revenue_qh_eur": afrr_net_revenue_qh_eur,
+        "afrr_energy_down_activated_qh": down_activated_qh,
+        "afrr_energy_up_activated_qh": up_activated_qh,
+        "selected_charge_market_qh": selected_charge_market_qh,
+        "selected_discharge_market_qh": selected_discharge_market_qh,
         "afrr_daily_log": pd.DataFrame(daily_logs),
     }
 
@@ -1450,30 +1591,23 @@ def reconcile_wholesale_afrr_dispatch_qh(
     idx_qh = build_quarter_hour_index(DEFAULT_YEAR)
 
     pv_direct_qh = np.repeat(np.asarray(result_hourly["pv_direct"], dtype=float) / QH_PER_HOUR, QH_PER_HOUR)
-
-    wholesale_pv_to_batt_qh = np.repeat(
-        np.asarray(result_hourly["pv_to_batt"], dtype=float) / QH_PER_HOUR,
-        QH_PER_HOUR,
-    )
-    
+    wholesale_pv_to_batt_qh = np.repeat(np.asarray(result_hourly["pv_to_batt"], dtype=float) / QH_PER_HOUR, QH_PER_HOUR)
     wholesale_pv_curtailed_to_batt_qh = np.repeat(
         np.asarray(result_hourly.get("pv_curtailed_to_battery", np.zeros(HOURS_PER_YEAR)), dtype=float) / QH_PER_HOUR,
         QH_PER_HOUR,
     )
-    
-    wholesale_grid_charge_qh = np.repeat(
-        np.asarray(result_hourly["grid_charge"], dtype=float) / QH_PER_HOUR,
-        QH_PER_HOUR,
-    )
+    wholesale_grid_charge_qh = np.repeat(np.asarray(result_hourly["grid_charge"], dtype=float) / QH_PER_HOUR, QH_PER_HOUR)
     wholesale_discharge_qh = np.repeat(np.asarray(result_hourly["discharge"], dtype=float) / QH_PER_HOUR, QH_PER_HOUR)
 
     batt_sell_price_qh = np.repeat(np.asarray(inputs.batt_sell_price, dtype=float), QH_PER_HOUR)
     grid_buy_price_qh = np.repeat(np.asarray(inputs.grid_buy_price, dtype=float), QH_PER_HOUR)
+    afrr_charge_price_qh = np.asarray(inputs.afrr_charge_price_qh, dtype=float)
+    afrr_discharge_price_qh = np.asarray(inputs.afrr_discharge_price_qh, dtype=float)
 
     afrr_charge_qh = np.asarray(afrr_result["afrr_charge_qh_mwh"], dtype=float).copy()
     afrr_discharge_qh = np.asarray(afrr_result["afrr_discharge_qh_mwh"], dtype=float).copy()
-    afrr_charge_price_qh = np.asarray(inputs.afrr_charge_price_qh, dtype=float)
-    afrr_discharge_price_qh = np.asarray(inputs.afrr_discharge_price_qh, dtype=float)
+    down_activated_qh = np.asarray(afrr_result.get("afrr_energy_down_activated_qh", np.zeros(QH_PER_YEAR)), dtype=int)
+    up_activated_qh = np.asarray(afrr_result.get("afrr_energy_up_activated_qh", np.zeros(QH_PER_YEAR)), dtype=int)
 
     if inputs.afrr_capacity_selected_market_h is None:
         afrr_capacity_selected_market_h = np.full(HOURS_PER_YEAR, "none", dtype=object)
@@ -1484,94 +1618,133 @@ def reconcile_wholesale_afrr_dispatch_qh(
     afrr_capacity_selected_market_qh = np.repeat(afrr_capacity_selected_market_h, QH_PER_HOUR)
 
     corrected_wholesale_pv_to_batt_qh = wholesale_pv_to_batt_qh.copy()
+    corrected_wholesale_pv_curtailed_to_batt_qh = wholesale_pv_curtailed_to_batt_qh.copy()
     corrected_wholesale_grid_charge_qh = wholesale_grid_charge_qh.copy()
     corrected_wholesale_discharge_qh = wholesale_discharge_qh.copy()
     corrected_afrr_charge_qh = afrr_charge_qh.copy()
     corrected_afrr_discharge_qh = afrr_discharge_qh.copy()
 
-    selected_discharge_channel_qh = np.full(QH_PER_YEAR, "none", dtype=object)
+    selected_charge_market_qh = np.full(QH_PER_YEAR, "none", dtype=object)
+    selected_charge_price_qh = np.full(QH_PER_YEAR, np.nan, dtype=float)
+    selected_discharge_market_qh = np.full(QH_PER_YEAR, "none", dtype=object)
     selected_discharge_price_qh = np.full(QH_PER_YEAR, np.nan, dtype=float)
 
     export_limit_qh_mwh = inputs.grid_export_limit_mw * QH_DT_HOURS
+    min_soc_mwh = inputs.batt_energy_mwh * inputs.min_soc_pct / 100.0
+    max_soc_mwh = inputs.batt_energy_mwh * inputs.max_soc_pct / 100.0
+    combined_soc_qh = np.zeros(QH_PER_YEAR + 1, dtype=float)
+    combined_soc_qh[0] = min(max(float(inputs.initial_soc_mwh), min_soc_mwh), max_soc_mwh)
 
     for t in range(QH_PER_YEAR):
         capacity_market = afrr_capacity_selected_market_qh[t]
 
         if capacity_market in ("up", "down"):
-            # aFRR Capacity reserves the battery: no wholesale charge/discharge in awarded hours.
             corrected_wholesale_pv_to_batt_qh[t] = 0.0
-            wholesale_pv_curtailed_to_batt_qh[t] = 0.0
+            corrected_wholesale_pv_curtailed_to_batt_qh[t] = 0.0
             corrected_wholesale_grid_charge_qh[t] = 0.0
             corrected_wholesale_discharge_qh[t] = 0.0
-
-            # aFRR Energy is allowed only in the matching capacity direction.
-            if capacity_market == "up":
-                corrected_afrr_charge_qh[t] = 0.0
-            elif capacity_market == "down":
+            if capacity_market == "down":
                 corrected_afrr_discharge_qh[t] = 0.0
+            elif capacity_market == "up":
+                corrected_afrr_charge_qh[t] = 0.0
         elif inputs.enable_afrr_capacity:
             corrected_afrr_charge_qh[t] = 0.0
             corrected_afrr_discharge_qh[t] = 0.0
+        else:
+            # Mode 2: aFRR and wholesale compete as routes for the same physical battery.
+            if corrected_afrr_charge_qh[t] > 1e-12:
+                if afrr_charge_price_qh[t] < grid_buy_price_qh[t]:
+                    corrected_wholesale_grid_charge_qh[t] = 0.0
+                else:
+                    corrected_afrr_charge_qh[t] = 0.0
+            if corrected_afrr_discharge_qh[t] > 1e-12:
+                if afrr_discharge_price_qh[t] > batt_sell_price_qh[t]:
+                    corrected_wholesale_discharge_qh[t] = 0.0
+                else:
+                    corrected_afrr_discharge_qh[t] = 0.0
 
-        # PV priority rule at quarter-hour reconciliation level:
-        # PV keeps priority on the grid export limit, but BESS/aFRR discharge
-        # can fill any remaining injection headroom.
         export_room_qh = max(export_limit_qh_mwh - pv_direct_qh[t], 0.0)
-        total_bess_discharge_qh = corrected_wholesale_discharge_qh[t] + corrected_afrr_discharge_qh[t]
-        if total_bess_discharge_qh > export_room_qh + 1e-12:
-            scale = export_room_qh / max(total_bess_discharge_qh, 1e-12)
+        total_discharge_qh = corrected_wholesale_discharge_qh[t] + corrected_afrr_discharge_qh[t]
+        if total_discharge_qh > export_room_qh + 1e-12:
+            scale = export_room_qh / max(total_discharge_qh, 1e-12)
             corrected_wholesale_discharge_qh[t] *= scale
             corrected_afrr_discharge_qh[t] *= scale
 
-        w_dis = corrected_wholesale_discharge_qh[t]
-        a_dis = corrected_afrr_discharge_qh[t]
+        total_charge_qh = (
+            corrected_wholesale_pv_to_batt_qh[t]
+            + corrected_wholesale_pv_curtailed_to_batt_qh[t]
+            + corrected_wholesale_grid_charge_qh[t]
+            + corrected_afrr_charge_qh[t]
+        )
+        total_discharge_qh = corrected_wholesale_discharge_qh[t] + corrected_afrr_discharge_qh[t]
 
-        w_price = batt_sell_price_qh[t] if w_dis > 1e-12 else -1e30
-        a_price = afrr_discharge_price_qh[t] if a_dis > 1e-12 else -1e30
-
-        if w_dis > 1e-12 and a_dis > 1e-12:
-            if w_price >= a_price:
-                corrected_afrr_discharge_qh[t] = 0.0
-                selected_discharge_channel_qh[t] = "wholesale"
-                selected_discharge_price_qh[t] = w_price
+        # Never charge and discharge simultaneously. Keep the economically stronger selected route.
+        if total_charge_qh > 1e-12 and total_discharge_qh > 1e-12:
+            charge_saving = max(grid_buy_price_qh[t] - afrr_charge_price_qh[t], 0.0) if corrected_afrr_charge_qh[t] > 1e-12 else 0.0
+            discharge_uplift = max(afrr_discharge_price_qh[t] - batt_sell_price_qh[t], 0.0) if corrected_afrr_discharge_qh[t] > 1e-12 else 0.0
+            if discharge_uplift >= charge_saving:
+                corrected_wholesale_pv_to_batt_qh[t] = 0.0
+                corrected_wholesale_pv_curtailed_to_batt_qh[t] = 0.0
+                corrected_wholesale_grid_charge_qh[t] = 0.0
+                corrected_afrr_charge_qh[t] = 0.0
             else:
                 corrected_wholesale_discharge_qh[t] = 0.0
-                selected_discharge_channel_qh[t] = "afrr"
-                selected_discharge_price_qh[t] = a_price
-        elif w_dis > 1e-12:
-            selected_discharge_channel_qh[t] = "wholesale"
-            selected_discharge_price_qh[t] = w_price
-        elif a_dis > 1e-12:
-            selected_discharge_channel_qh[t] = "afrr"
-            selected_discharge_price_qh[t] = a_price
-
-        total_selected_discharge_qh = corrected_wholesale_discharge_qh[t] + corrected_afrr_discharge_qh[t]
-        if total_selected_discharge_qh > 1e-12:
-            corrected_wholesale_pv_to_batt_qh[t] = 0.0
-            wholesale_pv_curtailed_to_batt_qh[t] = 0.0
-            corrected_wholesale_grid_charge_qh[t] = 0.0
-            corrected_afrr_charge_qh[t] = 0.0
-
-        total_selected_discharge_qh = corrected_wholesale_discharge_qh[t] + corrected_afrr_discharge_qh[t]
-        export_room_qh = max(export_limit_qh_mwh - pv_direct_qh[t], 0.0)
-
-        if total_selected_discharge_qh > export_room_qh + 1e-12:
-            if corrected_wholesale_discharge_qh[t] > 1e-12:
-                corrected_wholesale_discharge_qh[t] = min(corrected_wholesale_discharge_qh[t], export_room_qh)
                 corrected_afrr_discharge_qh[t] = 0.0
-                if corrected_wholesale_discharge_qh[t] <= 1e-12:
-                    selected_discharge_channel_qh[t] = "none"
-                    selected_discharge_price_qh[t] = np.nan
-            elif corrected_afrr_discharge_qh[t] > 1e-12:
-                corrected_afrr_discharge_qh[t] = min(corrected_afrr_discharge_qh[t], export_room_qh)
-                corrected_wholesale_discharge_qh[t] = 0.0
-                if corrected_afrr_discharge_qh[t] <= 1e-12:
-                    selected_discharge_channel_qh[t] = "none"
-                    selected_discharge_price_qh[t] = np.nan
+
+        soc_now = combined_soc_qh[t]
+        total_charge_input = (
+            corrected_wholesale_pv_to_batt_qh[t]
+            + corrected_wholesale_pv_curtailed_to_batt_qh[t]
+            + corrected_wholesale_grid_charge_qh[t]
+            + corrected_afrr_charge_qh[t]
+        )
+        max_charge_input_by_headroom = max(max_soc_mwh - soc_now, 0.0) / max(inputs.eta_charge, 1e-12)
+        if total_charge_input > max_charge_input_by_headroom + 1e-12:
+            scale = max_charge_input_by_headroom / max(total_charge_input, 1e-12)
+            corrected_wholesale_pv_to_batt_qh[t] *= scale
+            corrected_wholesale_pv_curtailed_to_batt_qh[t] *= scale
+            corrected_wholesale_grid_charge_qh[t] *= scale
+            corrected_afrr_charge_qh[t] *= scale
+
+        total_discharge_output = corrected_wholesale_discharge_qh[t] + corrected_afrr_discharge_qh[t]
+        max_discharge_output_by_soc = max(soc_now - min_soc_mwh, 0.0) * inputs.eta_discharge
+        if total_discharge_output > max_discharge_output_by_soc + 1e-12:
+            scale = max_discharge_output_by_soc / max(total_discharge_output, 1e-12)
+            corrected_wholesale_discharge_qh[t] *= scale
+            corrected_afrr_discharge_qh[t] *= scale
+
+        if corrected_afrr_charge_qh[t] > 1e-12:
+            selected_charge_market_qh[t] = "afrr"
+            selected_charge_price_qh[t] = afrr_charge_price_qh[t]
+        elif corrected_wholesale_grid_charge_qh[t] > 1e-12:
+            selected_charge_market_qh[t] = "wholesale_grid"
+            selected_charge_price_qh[t] = grid_buy_price_qh[t]
+        elif corrected_wholesale_pv_to_batt_qh[t] > 1e-12:
+            selected_charge_market_qh[t] = "pv"
+        elif corrected_wholesale_pv_curtailed_to_batt_qh[t] > 1e-12:
+            selected_charge_market_qh[t] = "curtailed_pv"
+
+        if corrected_afrr_discharge_qh[t] > 1e-12:
+            selected_discharge_market_qh[t] = "afrr"
+            selected_discharge_price_qh[t] = afrr_discharge_price_qh[t]
+        elif corrected_wholesale_discharge_qh[t] > 1e-12:
+            selected_discharge_market_qh[t] = "wholesale"
+            selected_discharge_price_qh[t] = batt_sell_price_qh[t]
+
+        charge_to_soc = (
+            corrected_wholesale_pv_to_batt_qh[t]
+            + corrected_wholesale_pv_curtailed_to_batt_qh[t]
+            + corrected_wholesale_grid_charge_qh[t]
+            + corrected_afrr_charge_qh[t]
+        ) * inputs.eta_charge
+        discharge_from_soc = (
+            corrected_wholesale_discharge_qh[t]
+            + corrected_afrr_discharge_qh[t]
+        ) / max(inputs.eta_discharge, 1e-12)
+        combined_soc_qh[t + 1] = min(max(soc_now + charge_to_soc - discharge_from_soc, min_soc_mwh), max_soc_mwh)
 
     corrected_wholesale_batt_sale_revenue_qh = corrected_wholesale_discharge_qh * batt_sell_price_qh
     corrected_wholesale_grid_charge_cost_qh = corrected_wholesale_grid_charge_qh * grid_buy_price_qh
-
     corrected_afrr_charge_cost_qh = corrected_afrr_charge_qh * afrr_charge_price_qh
     corrected_afrr_sale_revenue_qh = corrected_afrr_discharge_qh * afrr_discharge_price_qh
     corrected_afrr_cycle_cost_qh = (corrected_afrr_discharge_qh / max(inputs.eta_discharge, 1e-12)) * inputs.afrr_cycle_cost_eur_per_mwh
@@ -1579,74 +1752,11 @@ def reconcile_wholesale_afrr_dispatch_qh(
 
     charge_to_soc_qh = (
         corrected_wholesale_pv_to_batt_qh
-        + wholesale_pv_curtailed_to_batt_qh
+        + corrected_wholesale_pv_curtailed_to_batt_qh
         + corrected_wholesale_grid_charge_qh
         + corrected_afrr_charge_qh
     ) * inputs.eta_charge
-
-    discharge_from_soc_qh = (
-        corrected_wholesale_discharge_qh
-        + corrected_afrr_discharge_qh
-    ) / max(inputs.eta_discharge, 1e-12)
-
-    min_soc_mwh = inputs.batt_energy_mwh * inputs.min_soc_pct / 100.0
-    max_soc_mwh = inputs.batt_energy_mwh * inputs.max_soc_pct / 100.0
-
-    combined_soc_qh = np.zeros(QH_PER_YEAR + 1, dtype=float)
-    combined_soc_qh[0] = min(max(float(inputs.initial_soc_mwh), min_soc_mwh), max_soc_mwh)
-    
-    for t in range(QH_PER_YEAR):
-        soc_now = combined_soc_qh[t]
-    
-        total_charge_input = (
-            corrected_wholesale_pv_to_batt_qh[t]
-            + wholesale_pv_curtailed_to_batt_qh[t]
-            + corrected_wholesale_grid_charge_qh[t]
-            + corrected_afrr_charge_qh[t]
-        )
-    
-        max_charge_input_by_headroom = max(
-            max_soc_mwh - soc_now,
-            0.0
-        ) / max(inputs.eta_charge, 1e-12)
-    
-        if total_charge_input > max_charge_input_by_headroom + 1e-12:
-            scale = max_charge_input_by_headroom / max(total_charge_input, 1e-12)
-    
-            corrected_wholesale_pv_to_batt_qh[t] *= scale
-            wholesale_pv_curtailed_to_batt_qh[t] *= scale
-            corrected_wholesale_grid_charge_qh[t] *= scale
-            corrected_afrr_charge_qh[t] *= scale
-    
-        total_discharge_output = (
-            corrected_wholesale_discharge_qh[t]
-            + corrected_afrr_discharge_qh[t]
-        )
-    
-        max_discharge_output_by_soc = max(soc_now - min_soc_mwh, 0.0) * inputs.eta_discharge
-    
-        if total_discharge_output > max_discharge_output_by_soc + 1e-12:
-            scale = max_discharge_output_by_soc / max(total_discharge_output, 1e-12)
-    
-            corrected_wholesale_discharge_qh[t] *= scale
-            corrected_afrr_discharge_qh[t] *= scale
-    
-        charge_to_soc = (
-            corrected_wholesale_pv_to_batt_qh[t]
-            + wholesale_pv_curtailed_to_batt_qh[t]
-            + corrected_wholesale_grid_charge_qh[t]
-            + corrected_afrr_charge_qh[t]
-        ) * inputs.eta_charge
-    
-        discharge_from_soc = (
-            corrected_wholesale_discharge_qh[t]
-            + corrected_afrr_discharge_qh[t]
-        ) / max(inputs.eta_discharge, 1e-12)
-    
-        combined_soc_qh[t + 1] = min(
-            max(soc_now + charge_to_soc - discharge_from_soc, min_soc_mwh),
-            max_soc_mwh,
-        )
+    discharge_from_soc_qh = (corrected_wholesale_discharge_qh + corrected_afrr_discharge_qh) / max(inputs.eta_discharge, 1e-12)
 
     def reshape_sum(arr: np.ndarray) -> np.ndarray:
         return np.asarray(arr, dtype=float).reshape(HOURS_PER_YEAR, QH_PER_HOUR).sum(axis=1)
@@ -1657,8 +1767,8 @@ def reconcile_wholesale_afrr_dispatch_qh(
     return {
         "datetime_qh": idx_qh,
         "wholesale_pv_to_batt_qh_mwh": corrected_wholesale_pv_to_batt_qh,
-        "wholesale_pv_curtailed_to_batt_qh_mwh": wholesale_pv_curtailed_to_batt_qh,
-        "wholesale_pv_curtailed_to_batt_hourly_mwh": reshape_sum(wholesale_pv_curtailed_to_batt_qh),
+        "wholesale_pv_curtailed_to_batt_qh_mwh": corrected_wholesale_pv_curtailed_to_batt_qh,
+        "wholesale_pv_curtailed_to_batt_hourly_mwh": reshape_sum(corrected_wholesale_pv_curtailed_to_batt_qh),
         "wholesale_grid_charge_qh_mwh": corrected_wholesale_grid_charge_qh,
         "wholesale_discharge_qh_mwh": corrected_wholesale_discharge_qh,
         "wholesale_batt_sale_revenue_qh_eur": corrected_wholesale_batt_sale_revenue_qh,
@@ -1669,7 +1779,12 @@ def reconcile_wholesale_afrr_dispatch_qh(
         "afrr_sale_revenue_qh_eur": corrected_afrr_sale_revenue_qh,
         "afrr_cycle_cost_qh_eur": corrected_afrr_cycle_cost_qh,
         "afrr_net_revenue_qh_eur": corrected_afrr_net_revenue_qh,
-        "selected_discharge_channel_qh": selected_discharge_channel_qh,
+        "afrr_energy_down_activated_qh": down_activated_qh,
+        "afrr_energy_up_activated_qh": up_activated_qh,
+        "selected_charge_market_qh": selected_charge_market_qh,
+        "selected_charge_price_qh": selected_charge_price_qh,
+        "selected_discharge_market_qh": selected_discharge_market_qh,
+        "selected_discharge_channel_qh": selected_discharge_market_qh,
         "selected_discharge_price_qh": selected_discharge_price_qh,
         "afrr_capacity_selected_market_qh": afrr_capacity_selected_market_qh,
         "combined_charge_to_soc_qh_mwh": charge_to_soc_qh,
@@ -1687,6 +1802,8 @@ def reconcile_wholesale_afrr_dispatch_qh(
         "afrr_sale_revenue_hourly_eur": reshape_sum(corrected_afrr_sale_revenue_qh),
         "afrr_cycle_cost_hourly_eur": reshape_sum(corrected_afrr_cycle_cost_qh),
         "afrr_net_revenue_hourly_eur": reshape_sum(corrected_afrr_net_revenue_qh),
+        "afrr_energy_down_activated_hourly": reshape_sum(down_activated_qh),
+        "afrr_energy_up_activated_hourly": reshape_sum(up_activated_qh),
     }
 
 
@@ -2011,6 +2128,8 @@ def build_inputs_dataframe(inputs: SimulationInputs) -> pd.DataFrame:
         ("afrr_night_end_hour", inputs.afrr_night_end_hour),
         ("afrr_pv_zero_tolerance_mwh", inputs.afrr_pv_zero_tolerance_mwh),
         ("afrr_n_qh_per_side", inputs.afrr_n_qh_per_side),
+        ("afrr_energy_down_activation_pct", inputs.afrr_energy_down_activation_pct),
+        ("afrr_energy_up_activation_pct", inputs.afrr_energy_up_activation_pct),
         ("enable_afrr_capacity", inputs.enable_afrr_capacity),
         ("afrr_certified_capacity_pct", inputs.afrr_certified_capacity_pct),
         ("afrr_capacity_start_hour", inputs.afrr_capacity_start_hour),
@@ -2289,6 +2408,8 @@ def app():
     afrr_night_start_hour = 20
     afrr_night_end_hour = 8
     afrr_max_events_per_day = 1
+    afrr_energy_down_activation_pct = 100.0
+    afrr_energy_up_activation_pct = 100.0
 
     if enable_afrr:
         c_afrr1, c_afrr2, c_afrr3 = st.columns(3)
@@ -2300,6 +2421,8 @@ def app():
         with c_afrr2:
             afrr_min_spread = st.number_input("Spread minimum aFRR net (EUR/MWh)", min_value=0.0, value=10.0, step=1.0)
             afrr_cycle_cost = st.number_input("Coût de cycle aFRR (EUR/MWh)", min_value=0.0, value=float(cycle_cost), step=1.0)
+            afrr_energy_down_activation_pct = st.number_input("aFRR Energy Down Activation (%)", min_value=0.0, max_value=100.0, value=100.0, step=1.0)
+            afrr_energy_up_activation_pct = st.number_input("aFRR Energy Up Activation (%)", min_value=0.0, max_value=100.0, value=100.0, step=1.0)
 
         with c_afrr3:
             afrr_night_start_hour = st.slider("Début nuit", 0, 23, 20)
@@ -2362,6 +2485,12 @@ def app():
             return
         if not (0.0 <= afrr_certified_capacity_pct <= 100.0):
             st.error("% of Certified Capacity for aFRR doit être compris entre 0 et 100 %.")
+            return
+        if not (0.0 <= afrr_energy_down_activation_pct <= 100.0):
+            st.error("aFRR Energy Down Activation (%) doit être compris entre 0 et 100 %.")
+            return
+        if not (0.0 <= afrr_energy_up_activation_pct <= 100.0):
+            st.error("aFRR Energy Up Activation (%) doit être compris entre 0 et 100 %.")
             return
 
         try:
@@ -2588,6 +2717,8 @@ def app():
             afrr_night_end_hour=int(afrr_night_end_hour),
             afrr_pv_zero_tolerance_mwh=PV_ZERO_TOLERANCE_MWH,
             afrr_n_qh_per_side=16,
+            afrr_energy_down_activation_pct=afrr_energy_down_activation_pct,
+            afrr_energy_up_activation_pct=afrr_energy_up_activation_pct,
             enable_afrr_capacity=enable_afrr_capacity,
             afrr_capacity_up_price_h=afrr_capacity_up_price_h_raw,
             afrr_capacity_down_price_h=afrr_capacity_down_price_h_raw,
@@ -2683,7 +2814,12 @@ def app():
                 "afrr_discharge_from_soc_qh_mwh": reconciliation["afrr_discharge_qh_mwh"] / max(sim_inputs.eta_discharge, 1e-12),
                 "afrr_charge_market_qh_mwh": reconciliation["afrr_charge_qh_mwh"],
                 "afrr_discharge_market_qh_mwh": reconciliation["afrr_discharge_qh_mwh"],
+                "afrr_energy_down_activated": reconciliation["afrr_energy_down_activated_qh"],
+                "afrr_energy_up_activated": reconciliation["afrr_energy_up_activated_qh"],
+                "selected_charge_market_qh": reconciliation["selected_charge_market_qh"],
+                "selected_charge_price_qh": reconciliation["selected_charge_price_qh"],
                 "selected_discharge_channel_qh": reconciliation["selected_discharge_channel_qh"],
+                "selected_discharge_market_qh": reconciliation["selected_discharge_market_qh"],
                 "selected_discharge_price_qh": reconciliation["selected_discharge_price_qh"],
                 "battery_soc_mwh_end_qh": reconciliation["combined_soc_qh"][1:],
             })
@@ -2711,7 +2847,12 @@ def app():
                 "afrr_discharge_from_soc_qh_mwh": combined_soc_result["afrr_discharge_from_soc_qh"],
                 "afrr_charge_market_qh_mwh": combined_soc_result["afrr_charge_market_qh"],
                 "afrr_discharge_market_qh_mwh": combined_soc_result["afrr_discharge_market_qh"],
+                "afrr_energy_down_activated": np.zeros(QH_PER_YEAR, dtype=int),
+                "afrr_energy_up_activated": np.zeros(QH_PER_YEAR, dtype=int),
+                "selected_charge_market_qh": np.full(QH_PER_YEAR, "none", dtype=object),
+                "selected_charge_price_qh": np.full(QH_PER_YEAR, np.nan, dtype=float),
                 "selected_discharge_channel_qh": np.full(QH_PER_YEAR, "none", dtype=object),
+                "selected_discharge_market_qh": np.full(QH_PER_YEAR, "none", dtype=object),
                 "selected_discharge_price_qh": np.full(QH_PER_YEAR, np.nan, dtype=float),
                 "battery_soc_mwh_end_qh": combined_soc_result["combined_soc_qh"][1:],
             })
@@ -2805,6 +2946,10 @@ def app():
             "required_discharge_price_gate_estimate_eur_per_mwh": final_result["required_discharge_price_gate_estimate"],
             "afrr_charge_mwh": final_result["afrr_charge_hourly_mwh"] if "afrr_charge_hourly_mwh" in final_result else np.zeros(HOURS_PER_YEAR),
             "afrr_discharge_mwh": final_result["afrr_discharge_hourly_mwh"] if "afrr_discharge_hourly_mwh" in final_result else np.zeros(HOURS_PER_YEAR),
+            "afrr_energy_down_activated": reconciliation["afrr_energy_down_activated_hourly"] if reconciliation is not None and "afrr_energy_down_activated_hourly" in reconciliation else np.zeros(HOURS_PER_YEAR),
+            "afrr_energy_up_activated": reconciliation["afrr_energy_up_activated_hourly"] if reconciliation is not None and "afrr_energy_up_activated_hourly" in reconciliation else np.zeros(HOURS_PER_YEAR),
+            "selected_charge_market": (pd.Series(reconciliation["selected_charge_market_qh"]).to_numpy().reshape(HOURS_PER_YEAR, QH_PER_HOUR)[:, -1] if reconciliation is not None and "selected_charge_market_qh" in reconciliation else np.full(HOURS_PER_YEAR, "none", dtype=object)),
+            "selected_discharge_market": (pd.Series(reconciliation["selected_discharge_market_qh"]).to_numpy().reshape(HOURS_PER_YEAR, QH_PER_HOUR)[:, -1] if reconciliation is not None and "selected_discharge_market_qh" in reconciliation else np.full(HOURS_PER_YEAR, "none", dtype=object)),
             "afrr_charge_cost_eur": final_result["afrr_charge_cost_hourly_eur"] if "afrr_charge_cost_hourly_eur" in final_result else np.zeros(HOURS_PER_YEAR),
             "afrr_sale_revenue_eur": final_result["afrr_sale_revenue_hourly_eur"] if "afrr_sale_revenue_hourly_eur" in final_result else np.zeros(HOURS_PER_YEAR),
             "afrr_cycle_cost_eur": final_result["afrr_cycle_cost_hourly_eur"] if "afrr_cycle_cost_hourly_eur" in final_result else np.zeros(HOURS_PER_YEAR),
@@ -2819,6 +2964,8 @@ def app():
             "afrr_capacity_up_revenue_eur": final_result["afrr_capacity_up_revenue_h_eur"] if "afrr_capacity_up_revenue_h_eur" in final_result else np.zeros(HOURS_PER_YEAR),
             "afrr_capacity_down_revenue_eur": final_result["afrr_capacity_down_revenue_h_eur"] if "afrr_capacity_down_revenue_h_eur" in final_result else np.zeros(HOURS_PER_YEAR),
             "afrr_capacity_total_revenue_eur": final_result["afrr_capacity_total_revenue_h_eur"] if "afrr_capacity_total_revenue_h_eur" in final_result else np.zeros(HOURS_PER_YEAR),
+            "afrr_energy_down_activated": reconciliation["afrr_energy_down_activated_hourly"] if reconciliation is not None and "afrr_energy_down_activated_hourly" in reconciliation else np.zeros(HOURS_PER_YEAR),
+            "afrr_energy_up_activated": reconciliation["afrr_energy_up_activated_hourly"] if reconciliation is not None and "afrr_energy_up_activated_hourly" in reconciliation else np.zeros(HOURS_PER_YEAR),
             "battery_blocked_by_afrr_capacity": final_result["battery_blocked_by_afrr_capacity"] if "battery_blocked_by_afrr_capacity" in final_result else np.zeros(HOURS_PER_YEAR, dtype=int),
             "pv_capture_rate_pct": np.full(HOURS_PER_YEAR, pv_capture_rate_pct),
             "bess_capture_rate_pct": np.full(HOURS_PER_YEAR, bess_capture_rate_pct),
@@ -2867,9 +3014,16 @@ def app():
                 "afrr_discharge_price_effective_eur_per_mwh": sim_inputs.afrr_discharge_price_qh,
                 "afrr_charge_mwh": reconciliation["afrr_charge_qh_mwh"],
                 "afrr_discharge_mwh": reconciliation["afrr_discharge_qh_mwh"],
+                "afrr_energy_down_activated": reconciliation["afrr_energy_down_activated_qh"],
+                "afrr_energy_up_activated": reconciliation["afrr_energy_up_activated_qh"],
+                "selected_charge_market": reconciliation["selected_charge_market_qh"],
+                "selected_charge_price_eur_per_mwh": reconciliation["selected_charge_price_qh"],
+                "wholesale_grid_charge_mwh": reconciliation["wholesale_grid_charge_qh_mwh"],
                 "wholesale_discharge_mwh": reconciliation["wholesale_discharge_qh_mwh"],
                 "selected_discharge_channel": reconciliation["selected_discharge_channel_qh"],
+                "selected_discharge_market": reconciliation["selected_discharge_market_qh"],
                 "selected_discharge_price_eur_per_mwh": reconciliation["selected_discharge_price_qh"],
+                "afrr_capacity_selected_market": reconciliation["afrr_capacity_selected_market_qh"],
                 "combined_soc_mwh": reconciliation["combined_soc_qh"][1:],
                 "afrr_charge_cost_eur": reconciliation["afrr_charge_cost_qh_eur"],
                 "afrr_sale_revenue_eur": reconciliation["afrr_sale_revenue_qh_eur"],
@@ -2890,6 +3044,8 @@ def app():
             "afrr_capacity_up_revenue_eur": final_result["afrr_capacity_up_revenue_h_eur"] if "afrr_capacity_up_revenue_h_eur" in final_result else np.zeros(HOURS_PER_YEAR),
             "afrr_capacity_down_revenue_eur": final_result["afrr_capacity_down_revenue_h_eur"] if "afrr_capacity_down_revenue_h_eur" in final_result else np.zeros(HOURS_PER_YEAR),
             "afrr_capacity_total_revenue_eur": final_result["afrr_capacity_total_revenue_h_eur"] if "afrr_capacity_total_revenue_h_eur" in final_result else np.zeros(HOURS_PER_YEAR),
+            "afrr_energy_down_activated": reconciliation["afrr_energy_down_activated_hourly"] if reconciliation is not None and "afrr_energy_down_activated_hourly" in reconciliation else np.zeros(HOURS_PER_YEAR),
+            "afrr_energy_up_activated": reconciliation["afrr_energy_up_activated_hourly"] if reconciliation is not None and "afrr_energy_up_activated_hourly" in reconciliation else np.zeros(HOURS_PER_YEAR),
             "battery_blocked_by_afrr_capacity": final_result["battery_blocked_by_afrr_capacity"] if "battery_blocked_by_afrr_capacity" in final_result else np.zeros(HOURS_PER_YEAR, dtype=int),
         })
 
