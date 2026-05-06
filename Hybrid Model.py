@@ -3084,13 +3084,13 @@ def app():
         with c1:
             fig1, ax1 = plt.subplots(figsize=(8, 4.5))
             bars = [
-                float(final_result["total_direct_pv_revenue"][0]),
-                float(final_result["total_batt_sale_revenue"][0]),
-                -float(final_result["total_grid_charge_cost"][0]),
-                float(final_result["nightly_revenue_total"][0]),
-                float(final_result["total_afrr_net_revenue_eur"][0]) if "total_afrr_net_revenue_eur" in final_result else 0.0,
-                float(final_result["total_afrr_capacity_revenue_eur"][0]) if "total_afrr_capacity_revenue_eur" in final_result else 0.0,
-                float(pure_pv_benchmark["total_pv_only_revenue_eur"][0]),
+                float(final_result["total_direct_pv_revenue"][0]) / 1e6,
+                float(final_result["total_batt_sale_revenue"][0]) / 1e6,
+                -float(final_result["total_grid_charge_cost"][0]) / 1e6,
+                float(final_result["nightly_revenue_total"][0]) / 1e6,
+                float(final_result["total_afrr_net_revenue_eur"][0]) / 1e6 if "total_afrr_net_revenue_eur" in final_result else 0.0,
+                float(final_result["total_afrr_capacity_revenue_eur"][0]) / 1e6 if "total_afrr_capacity_revenue_eur" in final_result else 0.0,
+                float(pure_pv_benchmark["total_pv_only_revenue_eur"][0]) / 1e6,
             ]
         
             labels = [
