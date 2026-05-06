@@ -3095,11 +3095,11 @@ def app():
         
             labels = [
                 "PV direct",
-                "Vente batterie",
-                "Coût charge réseau",
+                "BESS Wholesale",
+                "BESS Charging Cost",
                 "SS nuit",
-                "aFRR Energy",
-                "aFRR Capacity",
+                "BESS aFRR Energy",
+                "BESS aFRR Capacity",
                 "PV-only",
             ]
         
@@ -3112,7 +3112,7 @@ def app():
             ax1.ticklabel_format(axis="y", style="plain", useOffset=False)
         
             ax1.set_title("Revenue Breakdown")
-            ax1.set_ylabel("EUR")
+            ax1.set_ylabel("million €")
             ax1.tick_params(axis="x", rotation=20)
         
             st.pyplot(fig1)
