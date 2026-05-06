@@ -3099,8 +3099,6 @@ def app():
             ax1.tick_params(axis="x", rotation=20)
             st.pyplot(fig1)
             plt.close(fig1)
-            plt.axhline(0, linewidth=1.5)
-            plt.ticklabel_format(style='plain', axis='y')
 
         with c2:
             fig2, ax2 = plt.subplots(figsize=(9, 4.8))
