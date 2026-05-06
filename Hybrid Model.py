@@ -46,8 +46,8 @@ class SimulationInputs:
     max_soc_pct: float = 100.0
     grid_export_limit_mw: float = 0.0
     cycle_cost_eur_per_mwh: float = 0.0
-    charge_quantile: float = 20.0
-    discharge_quantile: float = 80.0
+    charge_quantile: float = 100.0
+    discharge_quantile: float = 0.0
     max_cycles_per_year: float = 1.0
     min_spread_arbitrage_eur_per_mwh: float = 0.0
 
