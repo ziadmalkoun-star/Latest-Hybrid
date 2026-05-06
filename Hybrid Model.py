@@ -45,7 +45,9 @@ def _open_builtin_file(path: Path, label: str):
         raise FileNotFoundError(
             f"Le fichier intégré '{label}' est introuvable: {path}."
         )
-    return io.BytesIO(base64.b64decode(data_b64))
+    bio = io.BytesIO(base64.b64decode(data_b64))
+    bio.name = path.name
+    return bio
 
 
 
@@ -2669,12 +2671,15 @@ def app():
         afrr_certified_capacity_down_mw = 0.0
 
         def read_afrr_capacity_file(uploaded_file, year):
-            filename = uploaded_file.name.lower()
-        
+            filename = str(getattr(uploaded_file, "name", "")).lower()
+
             if filename.endswith(".csv"):
                 return read_afrr_capacity_csv(uploaded_file, year)
-            else:
+            if filename.endswith((".xlsx", ".xls")):
                 return read_afrr_capacity_excel(uploaded_file, year)
+
+            # Built-in embedded files are CSVs; this fallback prevents BytesIO name issues.
+            return read_afrr_capacity_csv(uploaded_file, year)
         
         
         if enable_afrr_capacity:
