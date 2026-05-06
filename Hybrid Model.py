@@ -2130,7 +2130,24 @@ def app():
             type=["xlsx", "xls", "csv"],
             key="bess_degradation_curve",
         )
-    
+
+
+    st.subheader("PV Commercial Structure")
+
+    contract_col1, contract_col2, contract_col3 = st.columns(3)
+
+    with contract_col1:
+        enable_cfd = st.radio("CfD", ["No", "Yes"], horizontal=True) == "Yes"
+        cfd_price_standalone = 0.0
+        if enable_cfd:
+            cfd_price_standalone = st.number_input("CfD Price (€/MWh)", value=50.0, step=1.0)
+
+    with contract_col2:
+        enable_ppa = st.radio("PPA", ["No", "Yes"], horizontal=True) == "Yes"
+        ppa_price_standalone = 0.0
+        if enable_ppa:
+            ppa_price_standalone = st.number_input("PPA Price (€/MWh)", value=50.0, step=1.0)
+            
     st.subheader("Courbe solaire 8760h")
     solar_mode = st.radio("Source du profil solaire", ["Courbe standard France", "Upload CSV 8760"], horizontal=True)
 
@@ -2205,22 +2222,6 @@ def app():
     with cur3:
         charge_battery_if_curtailment = st.radio("Charge Battery if Curtailment", ["No", "Yes"], horizontal=True) == "Yes"
         
-    st.subheader("PV Commercial Structure")
-
-    contract_col1, contract_col2, contract_col3 = st.columns(3)
-
-    with contract_col1:
-        enable_cfd = st.radio("CfD", ["No", "Yes"], horizontal=True) == "Yes"
-        cfd_price_standalone = 0.0
-        if enable_cfd:
-            cfd_price_standalone = st.number_input("CfD Price (€/MWh)", value=50.0, step=1.0)
-
-    with contract_col2:
-        enable_ppa = st.radio("PPA", ["No", "Yes"], horizontal=True) == "Yes"
-        ppa_price_standalone = 0.0
-        if enable_ppa:
-            ppa_price_standalone = st.number_input("PPA Price (€/MWh)", value=50.0, step=1.0)
-
     st.subheader("aFRR Capacity")
     enable_afrr_capacity = st.checkbox("Activer aFRR Capacity", value=False)
 
