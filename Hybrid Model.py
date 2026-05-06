@@ -861,13 +861,15 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
                                 continue
 
                     elif delta_soc < -1e-12:
-                        # PV priority rule: do not allow wholesale BESS discharge
-                        # when sellable PV is available. This preserves grid export
-                        # capacity for PV production first.
-                        if pv_sellable_t > 1e-9:
+                        # PV priority rule with export headroom:
+                        # PV keeps priority on the grid export limit, but BESS may
+                        # discharge during PV production if PV does not already fill
+                        # the available injection capacity.
+                        pv_export_headroom = max(inputs.grid_export_limit_mw - pv_sellable_t, 0.0)
+                        if pv_export_headroom <= 1e-9:
                             continue
 
-                        discharge_candidate = (-delta_soc) * inputs.eta_discharge
+                        discharge_candidate = min((-delta_soc) * inputs.eta_discharge, pv_export_headroom)
 
                         if discharge_candidate > 1e-9:
                             if batt_sell_t < discharge_threshold_series[t]:
@@ -965,13 +967,10 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
                 pv_direct_candidate = pv_sellable_t - sellable_pv_to_batt
 
             elif delta_soc < -1e-12:
-                # Safety mirror of the DP rule above. In normal operation the
-                # selected policy should never discharge when sellable PV is
-                # available, but this keeps the reconstructed flows consistent.
-                if pv_sellable_t > 1e-9:
-                    discharge[t] = 0.0
-                else:
-                    discharge[t] = (-delta_soc) * inputs.eta_discharge
+                # Safety mirror of the DP rule above: allow discharge only into
+                # remaining grid export headroom after PV priority.
+                pv_export_headroom = max(inputs.grid_export_limit_mw - pv_sellable_t, 0.0)
+                discharge[t] = min((-delta_soc) * inputs.eta_discharge, pv_export_headroom)
 
             pv_to_batt[t] = sellable_pv_to_batt
             pv_curtailed_to_battery[t] = recoverable_pv_to_batt
@@ -1515,11 +1514,14 @@ def reconcile_wholesale_afrr_dispatch_qh(
             corrected_afrr_discharge_qh[t] = 0.0
 
         # PV priority rule at quarter-hour reconciliation level:
-        # if PV is being exported in this quarter-hour, block BESS discharge
-        # so PV keeps priority on the grid export limit.
-        if pv_direct_qh[t] > 1e-9:
-            corrected_wholesale_discharge_qh[t] = 0.0
-            corrected_afrr_discharge_qh[t] = 0.0
+        # PV keeps priority on the grid export limit, but BESS/aFRR discharge
+        # can fill any remaining injection headroom.
+        export_room_qh = max(export_limit_qh_mwh - pv_direct_qh[t], 0.0)
+        total_bess_discharge_qh = corrected_wholesale_discharge_qh[t] + corrected_afrr_discharge_qh[t]
+        if total_bess_discharge_qh > export_room_qh + 1e-12:
+            scale = export_room_qh / max(total_bess_discharge_qh, 1e-12)
+            corrected_wholesale_discharge_qh[t] *= scale
+            corrected_afrr_discharge_qh[t] *= scale
 
         w_dis = corrected_wholesale_discharge_qh[t]
         a_dis = corrected_afrr_discharge_qh[t]
