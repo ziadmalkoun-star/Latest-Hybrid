@@ -16,6 +16,77 @@ DEFAULT_YEAR = 2025
 PV_ZERO_TOLERANCE_MWH = 1e-6
 
 
+def _open_builtin_input_file(display_name: str, candidate_filenames: list[str]):
+    """Open a bundled input file from the app folder or common data folders.
+
+    This is used for Streamlit options that behave like an automatic upload.
+    Put the files next to this script, or under data/, inputs/, or assets/.
+    """
+    import os
+
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    search_dirs = [base_dir, os.path.join(base_dir, "data"), os.path.join(base_dir, "inputs"), os.path.join(base_dir, "assets")]
+
+    for folder in search_dirs:
+        for filename in candidate_filenames:
+            path = os.path.join(folder, filename)
+            if os.path.exists(path):
+                return open(path, "rb")
+
+    searched = ", ".join(candidate_filenames)
+    raise FileNotFoundError(
+        f"Fichier intégré introuvable pour {display_name}. "
+        f"Ajoutez un de ces fichiers dans le dossier de l'app, data/, inputs/ ou assets/: {searched}"
+    )
+
+
+def _open_spot_price_spain_2024_file():
+    return _open_builtin_input_file(
+        "Spot Price Spain 2024",
+        [
+            "Spot Price Spain 2024.csv",
+            "Spot_Price_Spain_2024.csv",
+            "spot_price_spain_2024.csv",
+            "Spain Spot Price 2024.csv",
+        ],
+    )
+
+
+def _open_builtin_afrr_capacity_up_file():
+    return _open_builtin_input_file(
+        "aFRR_Capacity_UP",
+        ["aFRR_Capacity_UP.xlsx", "aFRR_Capacity_UP.xls", "aFRR_Capacity_UP.csv"],
+    )
+
+
+def _open_builtin_afrr_capacity_down_file():
+    return _open_builtin_input_file(
+        "aFRR_Capacity_Down",
+        ["aFRR_Capacity_Down.xlsx", "aFRR_Capacity_Down.xls", "aFRR_Capacity_Down.csv"],
+    )
+
+
+def _open_builtin_afrr_charge_file():
+    return _open_builtin_input_file(
+        "aFRR_charge",
+        ["aFRR_charge.csv", "afrr_charge.csv"],
+    )
+
+
+def _open_builtin_afrr_discharge_file():
+    return _open_builtin_input_file(
+        "afrr_discharge",
+        ["afrr_discharge.csv", "aFRR_discharge.csv"],
+    )
+
+
+def _open_builtin_curtailment_curve_file():
+    return _open_builtin_input_file(
+        "Curtailment Curve",
+        ["Curtailment Curve.xlsx", "Curtailment Curve.xls", "Curtailment Curve.csv", "Curtailment_Curve.xlsx", "Curtailment_Curve.xls", "Curtailment_Curve.csv"],
+    )
+
+
 @dataclass
 class SimulationInputs:
     batt_power_mw: float
@@ -247,7 +318,11 @@ def read_monthly_curtailment_excel(uploaded_file) -> np.ndarray:
     except Exception:
         pass
 
-    df = pd.read_excel(uploaded_file, header=None)
+    filename = getattr(uploaded_file, "name", "").lower()
+    if filename.endswith(".csv"):
+        df = pd.read_csv(uploaded_file, header=None, sep=None, engine="python")
+    else:
+        df = pd.read_excel(uploaded_file, header=None)
     values = pd.to_numeric(df.iloc[:, 0], errors="coerce").dropna().to_numpy(dtype=float)
 
     if len(values) != 12:
@@ -1828,7 +1903,7 @@ def build_final_result_after_market_arbitration(
     total_direct_pv_revenue = float(final["pv_direct_revenue"].sum())
     nightly_revenue_total = float(final["nightly_revenue_total"][0])
 
-    total_discharged_mwh = float(final["discharge"].sum() + reconciliation["afrr_discharge_hourly_mwh"].sum())
+    total_discharged_mwh = float(final["discharge"].sum())
     annual_discharge_cap_mwh = float(inputs.max_cycles_per_year) * float(inputs.batt_energy_mwh)
 
     final["total_batt_sale_revenue"] = np.array([total_batt_sale_revenue])
@@ -2282,31 +2357,49 @@ def app():
         )
 
     st.subheader("Sell Price - PV/Grid")
-    pv_price_mode = st.radio("Source du prix de vente du PV", ["Prix moyen annuel", "Upload CSV 8760"], horizontal=True)
+    pv_price_mode = st.radio(
+        "Source du prix de vente du PV",
+        ["Prix moyen annuel", "Upload CSV 8760", "Spot Price Spain 2024"],
+        horizontal=True,
+    )
     pv_price_value = None
     pv_price_upload = None
     if pv_price_mode == "Prix moyen annuel":
         pv_price_value = st.number_input("Prix moyen PV (EUR/MWh)", value=55.0, step=1.0)
-    else:
+    elif pv_price_mode == "Upload CSV 8760":
         pv_price_upload = st.file_uploader("Upload prix PV CSV (8760 lignes)", type=["csv"], key="pv_price")
+    else:
+        st.info("Le fichier intégré 'Spot Price Spain 2024' sera utilisé automatiquement.")
 
     st.subheader("Sell Price - BESS/Grid")
-    batt_sell_mode = st.radio("Source du prix de vente de l'énergie shiftée", ["Prix moyen annuel", "Upload CSV 8760"], horizontal=True)
+    batt_sell_mode = st.radio(
+        "Source du prix de vente de l'énergie shiftée",
+        ["Prix moyen annuel", "Upload CSV 8760", "Spot Price Spain 2024"],
+        horizontal=True,
+    )
     batt_sell_value = None
     batt_sell_upload = None
     if batt_sell_mode == "Prix moyen annuel":
         batt_sell_value = st.number_input("Prix moyen vente batterie (EUR/MWh)", value=90.0, step=1.0)
-    else:
+    elif batt_sell_mode == "Upload CSV 8760":
         batt_sell_upload = st.file_uploader("Upload prix vente batterie CSV (8760 lignes)", type=["csv"], key="batt_sell")
+    else:
+        st.info("Le fichier intégré 'Spot Price Spain 2024' sera utilisé automatiquement.")
 
     st.subheader("Buy Price - BESS/Grid")
-    grid_mode = st.radio("Source du prix d'achat réseau", ["Identique au prix vente batterie", "Prix moyen annuel", "Upload CSV 8760"], horizontal=True)
+    grid_mode = st.radio(
+        "Source du prix d'achat réseau",
+        ["Identique au prix vente batterie", "Prix moyen annuel", "Upload CSV 8760", "Spot Price Spain 2024"],
+        horizontal=True,
+    )
     grid_buy_value = None
     grid_buy_upload = None
     if grid_mode == "Prix moyen annuel":
         grid_buy_value = st.number_input("Prix moyen achat réseau (EUR/MWh)", value=55.0, step=1.0)
     elif grid_mode == "Upload CSV 8760":
         grid_buy_upload = st.file_uploader("Upload prix achat réseau CSV (8760 lignes)", type=["csv"], key="grid_buy")
+    elif grid_mode == "Spot Price Spain 2024":
+        st.info("Le fichier intégré 'Spot Price Spain 2024' sera utilisé automatiquement.")
 
     st.subheader("Curtailment")
     cur1, cur2, cur3 = st.columns(3)
@@ -2314,8 +2407,17 @@ def app():
     with cur1:
         tso_dso_curtailment = st.radio("TSO/DSO Curtailment", ["No", "Yes"], horizontal=True)
         tso_dso_upload = None
+        tso_dso_source = "Upload Annual Curtailment Curve Excel (12 monthly %)"
         if tso_dso_curtailment == "Yes":
-            tso_dso_upload = st.file_uploader("Upload Annual Curtailment Curve Excel (12 monthly %)", type=["xlsx", "xls", "csv"], key="tso_dso_curve")
+            tso_dso_source = st.radio(
+                "Source de la courbe TSO/DSO",
+                ["Upload Annual Curtailment Curve Excel (12 monthly %)", "Curtailment Curve"],
+                horizontal=False,
+            )
+            if tso_dso_source == "Upload Annual Curtailment Curve Excel (12 monthly %)":
+                tso_dso_upload = st.file_uploader("Upload Annual Curtailment Curve Excel (12 monthly %)", type=["xlsx", "xls", "csv"], key="tso_dso_curve")
+            else:
+                st.info("Le fichier intégré 'Curtailment Curve' sera utilisé automatiquement.")
 
     with cur2:
         self_curtailment = st.radio("Self Curtailment", ["No", "Yes"], horizontal=True)
@@ -2353,21 +2455,40 @@ def app():
     afrr_capacity_end_hour = 8
     afrr_capacity_min_price_up = 0.0
     afrr_capacity_min_price_down = 0.0
+    afrr_capacity_up_source = "Upload aFRR_Capacity_UP Excel"
+    afrr_capacity_down_source = "Upload aFRR_Capacity_Down Excel"
 
     if enable_afrr_capacity:
         cap_col1, cap_col2, cap_col3 = st.columns(3)
 
         with cap_col1:
-            afrr_capacity_up_upload = st.file_uploader(
-                "Upload aFRR_Capacity_UP Excel",
-                type=["xlsx", "xls", "csv"],
-                key="afrr_capacity_up",
+            afrr_capacity_up_source = st.radio(
+                "Source aFRR Capacity UP",
+                ["Upload aFRR_Capacity_UP Excel", "aFRR_Capacity_UP"],
+                horizontal=False,
             )
-            afrr_capacity_down_upload = st.file_uploader(
-                "Upload aFRR_Capacity_Down Excel",
-                type=["xlsx", "xls", "csv"],
-                key="afrr_capacity_down",
+            if afrr_capacity_up_source == "Upload aFRR_Capacity_UP Excel":
+                afrr_capacity_up_upload = st.file_uploader(
+                    "Upload aFRR_Capacity_UP Excel",
+                    type=["xlsx", "xls", "csv"],
+                    key="afrr_capacity_up",
+                )
+            else:
+                st.info("Le fichier intégré 'aFRR_Capacity_UP' sera utilisé automatiquement.")
+
+            afrr_capacity_down_source = st.radio(
+                "Source aFRR Capacity Down",
+                ["Upload aFRR_Capacity_Down Excel", "aFRR_Capacity_Down"],
+                horizontal=False,
             )
+            if afrr_capacity_down_source == "Upload aFRR_Capacity_Down Excel":
+                afrr_capacity_down_upload = st.file_uploader(
+                    "Upload aFRR_Capacity_Down Excel",
+                    type=["xlsx", "xls", "csv"],
+                    key="afrr_capacity_down",
+                )
+            else:
+                st.info("Le fichier intégré 'aFRR_Capacity_Down' sera utilisé automatiquement.")
 
         with cap_col2:
             afrr_certified_capacity_pct = st.number_input(
@@ -2410,13 +2531,32 @@ def app():
     afrr_max_events_per_day = 1
     afrr_energy_down_activation_pct = 100.0
     afrr_energy_up_activation_pct = 100.0
+    afrr_charge_source = "Upload prix aFRR charge CSV (35040 lignes)"
+    afrr_discharge_source = "Upload prix aFRR décharge CSV (35040 lignes)"
 
     if enable_afrr:
         c_afrr1, c_afrr2, c_afrr3 = st.columns(3)
 
         with c_afrr1:
-            afrr_charge_upload = st.file_uploader("Upload prix aFRR charge CSV (35040 lignes)", type=["csv"], key="afrr_charge")
-            afrr_discharge_upload = st.file_uploader("Upload prix aFRR décharge CSV (35040 lignes)", type=["csv"], key="afrr_discharge")
+            afrr_charge_source = st.radio(
+                "Source prix aFRR charge",
+                ["Upload prix aFRR charge CSV (35040 lignes)", "aFRR_charge"],
+                horizontal=False,
+            )
+            if afrr_charge_source == "Upload prix aFRR charge CSV (35040 lignes)":
+                afrr_charge_upload = st.file_uploader("Upload prix aFRR charge CSV (35040 lignes)", type=["csv"], key="afrr_charge")
+            else:
+                st.info("Le fichier intégré 'aFRR_charge' sera utilisé automatiquement.")
+
+            afrr_discharge_source = st.radio(
+                "Source prix aFRR décharge",
+                ["Upload prix aFRR décharge CSV (35040 lignes)", "afrr_discharge"],
+                horizontal=False,
+            )
+            if afrr_discharge_source == "Upload prix aFRR décharge CSV (35040 lignes)":
+                afrr_discharge_upload = st.file_uploader("Upload prix aFRR décharge CSV (35040 lignes)", type=["csv"], key="afrr_discharge")
+            else:
+                st.info("Le fichier intégré 'afrr_discharge' sera utilisé automatiquement.")
 
         with c_afrr2:
             afrr_min_spread = st.number_input("Spread minimum aFRR net (EUR/MWh)", min_value=0.0, value=10.0, step=1.0)
@@ -2480,9 +2620,13 @@ def app():
         if enable_afrr and (not enable_afrr_capacity) and (not allow_afrr_energy_without_capacity):
             st.error("La participation en aFRR Energy sans aFRR Capacity n’est pas autorisée.")
             return
-        if enable_afrr_capacity and (afrr_capacity_up_upload is None or afrr_capacity_down_upload is None):
-            st.error("Merci d'uploader les deux fichiers Excel aFRR Capacity UP et Down.")
-            return
+        if enable_afrr_capacity:
+            if afrr_capacity_up_source == "Upload aFRR_Capacity_UP Excel" and afrr_capacity_up_upload is None:
+                st.error("Merci d'uploader le fichier Excel aFRR Capacity UP ou de choisir l'option intégrée aFRR_Capacity_UP.")
+                return
+            if afrr_capacity_down_source == "Upload aFRR_Capacity_Down Excel" and afrr_capacity_down_upload is None:
+                st.error("Merci d'uploader le fichier Excel aFRR Capacity Down ou de choisir l'option intégrée aFRR_Capacity_Down.")
+                return
         if not (0.0 <= afrr_certified_capacity_pct <= 100.0):
             st.error("% of Certified Capacity for aFRR doit être compris entre 0 et 100 %.")
             return
@@ -2539,30 +2683,40 @@ def app():
         else:
             if pv_price_mode == "Prix moyen annuel":
                 pv_price_curve_raw = _make_flat_curve(pv_price_value)
-            else:
+            elif pv_price_mode == "Upload CSV 8760":
                 pv_price_curve_raw = _read_single_column_csv(pv_price_upload)
+            else:
+                pv_price_curve_raw = _read_single_column_csv(_open_spot_price_spain_2024_file())
 
         if pv_price_curve_raw is None:
             raise ValueError("pv_price_curve_raw was not properly initialized.")
 
-        batt_sell_curve_raw = (
-            _make_flat_curve(batt_sell_value)
-            if batt_sell_mode == "Prix moyen annuel"
-            else _read_single_column_csv(batt_sell_upload)
-        )
+        if batt_sell_mode == "Prix moyen annuel":
+            batt_sell_curve_raw = _make_flat_curve(batt_sell_value)
+        elif batt_sell_mode == "Upload CSV 8760":
+            batt_sell_curve_raw = _read_single_column_csv(batt_sell_upload)
+        else:
+            batt_sell_curve_raw = _read_single_column_csv(_open_spot_price_spain_2024_file())
 
         if grid_mode == "Identique au prix vente batterie":
             grid_buy_curve_raw = batt_sell_curve_raw.copy()
         elif grid_mode == "Prix moyen annuel":
             grid_buy_curve_raw = _make_flat_curve(grid_buy_value)
-        else:
+        elif grid_mode == "Upload CSV 8760":
             grid_buy_curve_raw = _read_single_column_csv(grid_buy_upload)
+        else:
+            grid_buy_curve_raw = _read_single_column_csv(_open_spot_price_spain_2024_file())
 
         afrr_charge_curve_qh_raw = None
         afrr_discharge_curve_qh_raw = None
         if enable_afrr:
+            if afrr_charge_source == "aFRR_charge":
+                afrr_charge_upload = _open_builtin_afrr_charge_file()
+            if afrr_discharge_source == "afrr_discharge":
+                afrr_discharge_upload = _open_builtin_afrr_discharge_file()
+
             if afrr_charge_upload is None or afrr_discharge_upload is None:
-                st.error("Merci d'uploader les deux CSV aFRR quart-horaires.")
+                st.error("Merci d'uploader les deux CSV aFRR quart-horaires ou de choisir les options intégrées.")
                 return
             afrr_charge_curve_qh_raw = _read_single_column_csv_qh(afrr_charge_upload)
             afrr_discharge_curve_qh_raw = _read_single_column_csv_qh(afrr_discharge_upload)
@@ -2584,6 +2738,11 @@ def app():
         
         if enable_afrr_capacity:
             try:
+                if afrr_capacity_up_source == "aFRR_Capacity_UP":
+                    afrr_capacity_up_upload = _open_builtin_afrr_capacity_up_file()
+                if afrr_capacity_down_source == "aFRR_Capacity_Down":
+                    afrr_capacity_down_upload = _open_builtin_afrr_capacity_down_file()
+
                 afrr_capacity_up_price_h_raw = read_afrr_capacity_file(afrr_capacity_up_upload, DEFAULT_YEAR)
                 afrr_capacity_down_price_h_raw = read_afrr_capacity_file(afrr_capacity_down_upload, DEFAULT_YEAR)
             except Exception as e:
@@ -2619,8 +2778,10 @@ def app():
 
         # 1) TSO/DSO curtailment
         if tso_dso_curtailment == "Yes":
+            if tso_dso_source == "Curtailment Curve":
+                tso_dso_upload = _open_builtin_curtailment_curve_file()
             if tso_dso_upload is None:
-                st.error("Merci d'uploader la courbe annuelle de curtailment TSO/DSO.")
+                st.error("Merci d'uploader la courbe annuelle de curtailment TSO/DSO ou de choisir l'option intégrée Curtailment Curve.")
                 return
             tso_dso_monthly_pct = read_monthly_curtailment_excel(tso_dso_upload)
             tso_out = apply_tso_dso_curtailment(base_pv_hourly_mwh, tso_dso_monthly_pct)
