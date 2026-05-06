@@ -16,11 +16,36 @@ DEFAULT_YEAR = 2025
 PV_ZERO_TOLERANCE_MWH = 1e-6
 
 
-def _open_builtin_input_file(display_name: str, candidate_filenames: list[str]):
-    """Open a bundled input file from the app folder or common data folders.
+class _NamedBytesIO(io.BytesIO):
+    """Small file-like object with a .name attribute, like Streamlit uploads."""
+    def __init__(self, data: bytes, name: str):
+        super().__init__(data)
+        self.name = name
 
-    This is used for Streamlit options that behave like an automatic upload.
-    Put the files next to this script, or under data/, inputs/, or assets/.
+
+def _csv_file_from_array(values: np.ndarray, name: str, decimal_comma: bool = False) -> _NamedBytesIO:
+    lines = []
+    for value in np.asarray(values, dtype=float).reshape(-1):
+        txt = f"{value:.6f}"
+        if decimal_comma:
+            txt = txt.replace(".", ",")
+        lines.append(txt)
+    return _NamedBytesIO(("\n".join(lines) + "\n").encode("utf-8"), name)
+
+
+def _capacity_csv_file_from_array(values: np.ndarray, name: str, year: int = DEFAULT_YEAR) -> _NamedBytesIO:
+    rows = [f";{year}"]
+    for hour, value in enumerate(np.asarray(values, dtype=float).reshape(-1)):
+        rows.append(f"{hour};{value:.6f}".replace(".", ","))
+    return _NamedBytesIO(("\n".join(rows) + "\n").encode("utf-8"), name)
+
+
+def _open_builtin_input_file(display_name: str, candidate_filenames: list[str], fallback_factory=None):
+    """Open a bundled input file, or create an embedded default file.
+
+    The app first looks next to this script and under data/, inputs/, and assets/.
+    If nothing is found, the fallback_factory creates a valid in-memory CSV, so
+    the automatic options work even when you run this single .py file alone.
     """
     import os
 
@@ -33,11 +58,66 @@ def _open_builtin_input_file(display_name: str, candidate_filenames: list[str]):
             if os.path.exists(path):
                 return open(path, "rb")
 
+    if fallback_factory is not None:
+        try:
+            st.warning(f"Fichier intégré '{display_name}' non trouvé: utilisation d'une courbe par défaut embarquée dans le script.")
+        except Exception:
+            pass
+        return fallback_factory()
+
     searched = ", ".join(candidate_filenames)
     raise FileNotFoundError(
         f"Fichier intégré introuvable pour {display_name}. "
         f"Ajoutez un de ces fichiers dans le dossier de l'app, data/, inputs/ ou assets/: {searched}"
     )
+
+
+def _embedded_spot_price_spain_2024() -> np.ndarray:
+    idx = pd.date_range("2024-01-01 00:00:00", periods=HOURS_PER_YEAR, freq="h")
+    hour = idx.hour.to_numpy()
+    doy = idx.dayofyear.to_numpy()
+    daily = 18.0 * np.sin(2 * np.pi * (hour - 7) / 24.0)
+    evening_peak = 24.0 * np.exp(-((hour - 20.0) / 3.0) ** 2)
+    seasonal = 9.0 * np.cos(2 * np.pi * (doy - 15) / 365.0)
+    weekend_discount = np.where(idx.dayofweek.to_numpy() >= 5, -8.0, 0.0)
+    price = 55.0 + daily + evening_peak + seasonal + weekend_discount
+    return np.clip(price, -10.0, 180.0)
+
+
+def _embedded_afrr_capacity_up() -> np.ndarray:
+    idx = pd.date_range(f"{DEFAULT_YEAR}-01-01 00:00:00", periods=HOURS_PER_YEAR, freq="h")
+    hour = idx.hour.to_numpy()
+    doy = idx.dayofyear.to_numpy()
+    return np.clip(10.0 + 6.0 * np.exp(-((hour - 20.0) / 4.0) ** 2) + 2.0 * np.cos(2 * np.pi * doy / 365.0), 0.0, None)
+
+
+def _embedded_afrr_capacity_down() -> np.ndarray:
+    idx = pd.date_range(f"{DEFAULT_YEAR}-01-01 00:00:00", periods=HOURS_PER_YEAR, freq="h")
+    hour = idx.hour.to_numpy()
+    doy = idx.dayofyear.to_numpy()
+    return np.clip(8.0 + 5.0 * np.exp(-((hour - 2.0) / 5.0) ** 2) + 1.5 * np.sin(2 * np.pi * doy / 365.0), 0.0, None)
+
+
+def _embedded_afrr_charge_qh() -> np.ndarray:
+    idx = pd.date_range(f"{DEFAULT_YEAR}-01-01 00:00:00", periods=QH_PER_YEAR, freq="15min")
+    hour = idx.hour.to_numpy() + idx.minute.to_numpy() / 60.0
+    doy = idx.dayofyear.to_numpy()
+    return np.clip(35.0 - 12.0 * np.exp(-((hour - 3.0) / 3.0) ** 2) + 4.0 * np.cos(2 * np.pi * doy / 365.0), -20.0, 120.0)
+
+
+def _embedded_afrr_discharge_qh() -> np.ndarray:
+    idx = pd.date_range(f"{DEFAULT_YEAR}-01-01 00:00:00", periods=QH_PER_YEAR, freq="15min")
+    hour = idx.hour.to_numpy() + idx.minute.to_numpy() / 60.0
+    doy = idx.dayofyear.to_numpy()
+    return np.clip(75.0 + 18.0 * np.exp(-((hour - 21.0) / 3.0) ** 2) + 5.0 * np.cos(2 * np.pi * doy / 365.0), 0.0, 220.0)
+
+
+def _embedded_curtailment_curve() -> np.ndarray:
+    return np.array([0.01, 0.01, 0.015, 0.02, 0.025, 0.03, 0.03, 0.025, 0.02, 0.015, 0.01, 0.01], dtype=float)
+
+
+def _embedded_solar_relative_8760() -> np.ndarray:
+    return build_standard_france_solar_profile()
 
 
 def _open_spot_price_spain_2024_file():
@@ -49,6 +129,15 @@ def _open_spot_price_spain_2024_file():
             "spot_price_spain_2024.csv",
             "Spain Spot Price 2024.csv",
         ],
+        fallback_factory=lambda: _csv_file_from_array(_embedded_spot_price_spain_2024(), "Spot Price Spain 2024.csv"),
+    )
+
+
+def _open_builtin_solar_curve_file():
+    return _open_builtin_input_file(
+        "Courbe solaire 8760h",
+        ["Courbe solaire 8760h.csv", "Courbe_solaire_8760h.csv", "solar_curve_8760h.csv"],
+        fallback_factory=lambda: _csv_file_from_array(_embedded_solar_relative_8760(), "Courbe solaire 8760h.csv"),
     )
 
 
@@ -56,6 +145,7 @@ def _open_builtin_afrr_capacity_up_file():
     return _open_builtin_input_file(
         "aFRR_Capacity_UP",
         ["aFRR_Capacity_UP.xlsx", "aFRR_Capacity_UP.xls", "aFRR_Capacity_UP.csv"],
+        fallback_factory=lambda: _capacity_csv_file_from_array(_embedded_afrr_capacity_up(), "aFRR_Capacity_UP.csv"),
     )
 
 
@@ -63,6 +153,7 @@ def _open_builtin_afrr_capacity_down_file():
     return _open_builtin_input_file(
         "aFRR_Capacity_Down",
         ["aFRR_Capacity_Down.xlsx", "aFRR_Capacity_Down.xls", "aFRR_Capacity_Down.csv"],
+        fallback_factory=lambda: _capacity_csv_file_from_array(_embedded_afrr_capacity_down(), "aFRR_Capacity_Down.csv"),
     )
 
 
@@ -70,6 +161,7 @@ def _open_builtin_afrr_charge_file():
     return _open_builtin_input_file(
         "aFRR_charge",
         ["aFRR_charge.csv", "afrr_charge.csv"],
+        fallback_factory=lambda: _csv_file_from_array(_embedded_afrr_charge_qh(), "aFRR_charge.csv"),
     )
 
 
@@ -77,6 +169,7 @@ def _open_builtin_afrr_discharge_file():
     return _open_builtin_input_file(
         "afrr_discharge",
         ["afrr_discharge.csv", "aFRR_discharge.csv"],
+        fallback_factory=lambda: _csv_file_from_array(_embedded_afrr_discharge_qh(), "afrr_discharge.csv"),
     )
 
 
@@ -84,6 +177,7 @@ def _open_builtin_curtailment_curve_file():
     return _open_builtin_input_file(
         "Curtailment Curve",
         ["Curtailment Curve.xlsx", "Curtailment Curve.xls", "Curtailment Curve.csv", "Curtailment_Curve.xlsx", "Curtailment_Curve.xls", "Curtailment_Curve.csv"],
+        fallback_factory=lambda: _csv_file_from_array(_embedded_curtailment_curve(), "Curtailment Curve.csv"),
     )
 
 
@@ -2345,7 +2439,11 @@ def app():
             ppa_price_standalone = st.number_input("PPA Price (€/MWh)", value=50.0, step=1.0)
             
     st.subheader("Courbe solaire 8760h")
-    solar_mode = st.radio("Source du profil solaire", ["Courbe standard France", "Upload CSV 8760"], horizontal=True)
+    solar_mode = st.radio(
+        "Source du profil solaire",
+        ["Courbe standard France", "Upload CSV 8760", "Courbe solaire 8760h"],
+        horizontal=True,
+    )
 
     solar_upload = None
     uploaded_solar_is_relative = True
@@ -2355,6 +2453,8 @@ def app():
             "Le CSV uploadé est un profil relatif à normaliser sur le productible annuel (sinon : MWh nets horaires absolus)",
             value=True,
         )
+    elif solar_mode == "Courbe solaire 8760h":
+        st.info("La courbe solaire intégrée sera utilisée automatiquement.")
 
     st.subheader("Sell Price - PV/Grid")
     pv_price_mode = st.radio(
@@ -2654,8 +2754,12 @@ def app():
                 solar_relative, pv_dc_mw, productible, pv_losses_pct, availability_pct
             )
         else:
+            if solar_mode == "Courbe solaire 8760h":
+                solar_upload = _open_builtin_solar_curve_file()
+                uploaded_solar_is_relative = True
+
             if solar_upload is None:
-                st.error("Merci d'uploader un CSV solaire 8760.")
+                st.error("Merci d'uploader un CSV solaire 8760 ou de choisir la courbe solaire intégrée.")
                 return
 
             uploaded = _read_single_column_csv(solar_upload)
