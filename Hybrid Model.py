@@ -2102,6 +2102,7 @@ def app():
         pv_dc_mw = st.number_input("Puissance PV DC (MWc)", min_value=0.0, value=100.0, step=1.0)
         productible = st.number_input("Productible PV (kWh/kWc/an)", min_value=0.0, value=1200.0, step=10.0)
         grid_export_limit_mw = st.number_input("Limite injection réseau (MW)", min_value=0.0, value=100.0, step=1.0)
+        project_lifetime_years = int(st.number_input("Project Lifetime (years)", min_value=1, value=1, step=1))
         charge_quantile = st.slider("Quantile charge (%)", 0, 100, 20)
         discharge_quantile = st.slider("Quantile décharge (%)", 0, 100, 80)
         min_soc_pct = st.slider("Minimum SOC batterie (%)", 0, 100, 20)
@@ -2124,6 +2125,12 @@ def app():
         cycle_cost = st.number_input("Coût de cycle batterie (EUR/MWh)", value=5.0)
         min_spread_arbitrage = st.number_input("Minimum Spread for Arbitrage (EUR/MWh)", min_value=0.0, value=10.0, step=1.0)
 
+    bess_degradation_upload = st.file_uploader(
+            "BESS Degradation Curve",
+            type=["xlsx", "xls", "csv"],
+            key="bess_degradation_curve",
+        )
+    
     st.subheader("Courbe solaire 8760h")
     solar_mode = st.radio("Source du profil solaire", ["Courbe standard France", "Upload CSV 8760"], horizontal=True)
 
@@ -2213,16 +2220,6 @@ def app():
         ppa_price_standalone = 0.0
         if enable_ppa:
             ppa_price_standalone = st.number_input("PPA Price (€/MWh)", value=50.0, step=1.0)
-
-    with contract_col3:
-        project_lifetime_years = int(
-            st.number_input("Project Lifetime", min_value=1, value=1, step=1)
-        )
-        bess_degradation_upload = st.file_uploader(
-            "BESS Degradation Curve",
-            type=["xlsx", "xls", "csv"],
-            key="bess_degradation_curve",
-        )
 
     st.subheader("aFRR Capacity")
     enable_afrr_capacity = st.checkbox("Activer aFRR Capacity", value=False)
