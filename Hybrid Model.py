@@ -2160,7 +2160,7 @@ def app():
             value=True,
         )
 
-    st.subheader("Prix PV")
+    st.subheader("Sell Price - PV/Grid")
     pv_price_mode = st.radio("Source du prix de vente du PV", ["Prix moyen annuel", "Upload CSV 8760"], horizontal=True)
     pv_price_value = None
     pv_price_upload = None
@@ -2169,7 +2169,7 @@ def app():
     else:
         pv_price_upload = st.file_uploader("Upload prix PV CSV (8760 lignes)", type=["csv"], key="pv_price")
 
-    st.subheader("Prix vente batterie")
+    st.subheader("Sell Price - BESS/Grid")
     batt_sell_mode = st.radio("Source du prix de vente de l'énergie shiftée", ["Prix moyen annuel", "Upload CSV 8760"], horizontal=True)
     batt_sell_value = None
     batt_sell_upload = None
@@ -2178,7 +2178,7 @@ def app():
     else:
         batt_sell_upload = st.file_uploader("Upload prix vente batterie CSV (8760 lignes)", type=["csv"], key="batt_sell")
 
-    st.subheader("Prix d'achat réseau pour charge batterie")
+    st.subheader("Buy Price - BESS/Grid")
     grid_mode = st.radio("Source du prix d'achat réseau", ["Identique au prix vente batterie", "Prix moyen annuel", "Upload CSV 8760"], horizontal=True)
     grid_buy_value = None
     grid_buy_upload = None
