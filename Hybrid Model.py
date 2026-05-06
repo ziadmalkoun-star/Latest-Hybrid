@@ -2115,12 +2115,14 @@ def app():
         nightly_bess_revenue = st.number_input("Ancillary Services Revenues (EUR/nuit)", min_value=0.0, value=0.0, step=10.0)
         
     with col2:
+        st.subheader("PV Parameters")
         pv_dc_mw = st.number_input("PV DC Power (MWc)", min_value=0.0, value=100.0, step=1.0)
         productible = st.number_input("PV Yield (kWh/kWc/an)", min_value=0.0, value=1200.0, step=10.0)
         pv_losses_pct = st.number_input("PV System Losses (%)", min_value=0.0, max_value=100.0, value=8.0, step=0.5)
         pv_capture_rate_pct = st.number_input("PV Capture Rate (%)", min_value=0.0, max_value=100.0, value=100.0, step=1.0)
         
     with col3:
+        st.subheader("General Parameters")
         project_lifetime_years = int(st.number_input("Project Lifetime (years)", min_value=1, value=1, step=1))
         availability_pct = st.number_input("Power Plant Availability (%)", min_value=0.0, max_value=100.0, value=98.0, step=0.1)
         grid_export_limit_mw = st.number_input("Grid Injection Limit (MW)", min_value=0.0, value=100.0, step=1.0)
