@@ -1828,7 +1828,7 @@ def build_final_result_after_market_arbitration(
     total_direct_pv_revenue = float(final["pv_direct_revenue"].sum())
     nightly_revenue_total = float(final["nightly_revenue_total"][0])
 
-    total_discharged_mwh = float(final["discharge"].sum())
+    total_discharged_mwh = float(final["discharge"].sum() + reconciliation["afrr_discharge_hourly_mwh"].sum())
     annual_discharge_cap_mwh = float(inputs.max_cycles_per_year) * float(inputs.batt_energy_mwh)
 
     final["total_batt_sale_revenue"] = np.array([total_batt_sale_revenue])
