@@ -2015,7 +2015,11 @@ def build_summary_table(
     bess_sold_mwh = float(result["energy_shifted_mwh"][0])
 
     afrr_discharged_mwh = float(np.sum(result["afrr_discharge_hourly_mwh"])) if "afrr_discharge_hourly_mwh" in result else 0.0
+    bess_grid_charged_mwh = float(np.sum(result["grid_charge"])) if "grid_charge" in result else 0.0
+    afrr_charged_mwh = float(np.sum(result["afrr_charge_hourly_mwh"])) if "afrr_charge_hourly_mwh" in result else 0.0
     bess_total_discharged_mwh = bess_sold_mwh + afrr_discharged_mwh
+    bess_total_charged_mwh = bess_grid_charged_mwh + afrr_charged_mwh
+    bess_total_throughput_mwh = bess_total_charged_mwh + bess_total_discharged_mwh
 
     pv_rev_eur_per_mwh = pv_revenue / max(pv_sold_mwh, 1e-12)
     bess_rev_eur_per_mwh = bess_revenue_total / max(bess_total_discharged_mwh, 1e-12)
@@ -2062,6 +2066,9 @@ def build_summary_table(
         ("Énergie totale vendue", float(result["energy_sold_total_mwh"][0]) + afrr_discharged_mwh, "MWh"),
         ("Énergie shiftée wholesale", bess_sold_mwh, "MWh"),
         ("Énergie déchargée aFRR", afrr_discharged_mwh, "MWh"),
+        ("Énergie chargée BESS depuis réseau", bess_grid_charged_mwh, "MWh"),
+        ("Énergie chargée aFRR", afrr_charged_mwh, "MWh"),
+        ("Total BESS throughput", bess_total_throughput_mwh, "MWh"),
         ("Énergie PV vendue directement", pv_sold_mwh, "MWh"),
         ("Cycles équivalents batterie", float(result["equivalent_cycles"][0]), "cycles/an"),
         ("Cycles max / an", max_cycles_per_year, "cycles/an"),
