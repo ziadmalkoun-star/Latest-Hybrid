@@ -2205,7 +2205,7 @@ def app():
     with cur3:
         charge_battery_if_curtailment = st.radio("Charge Battery if Curtailment", ["No", "Yes"], horizontal=True) == "Yes"
         
-    st.subheader("Contrats PV et durée projet")
+    st.subheader("PV Commercial Structure")
 
     contract_col1, contract_col2, contract_col3 = st.columns(3)
 
