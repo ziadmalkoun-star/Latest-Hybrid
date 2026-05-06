@@ -2317,25 +2317,40 @@ def app():
         )
 
     st.subheader("Sell Price - PV/Grid")
-    pv_price_mode = st.radio("Source du prix de vente du PV", ["Prix moyen annuel", "Upload CSV 8760", "Spot Price Spain 2024"], horizontal=True)
+    pv_price_mode = st.radio(
+        "Source du prix de vente du PV",
+        ["Prix moyen annuel", "Upload CSV 8760", "Spot Price Spain 2024"],
+        index=2,
+        horizontal=True,
+    )
     pv_price_value = None
     pv_price_upload = None
     if pv_price_mode == "Prix moyen annuel":
         pv_price_value = st.number_input("Prix moyen PV (EUR/MWh)", value=55.0, step=1.0)
-    else:
+    elif pv_price_mode == "Upload CSV 8760":
         pv_price_upload = st.file_uploader("Upload prix PV CSV (8760 lignes)", type=["csv"], key="pv_price")
 
     st.subheader("Sell Price - BESS/Grid")
-    batt_sell_mode = st.radio("Source du prix de vente de l'énergie shiftée", ["Prix moyen annuel", "Upload CSV 8760", "Spot Price Spain 2024"], horizontal=True)
+    batt_sell_mode = st.radio(
+        "Source du prix de vente de l'énergie shiftée",
+        ["Prix moyen annuel", "Upload CSV 8760", "Spot Price Spain 2024"],
+        index=2,
+        horizontal=True,
+    )
     batt_sell_value = None
     batt_sell_upload = None
     if batt_sell_mode == "Prix moyen annuel":
         batt_sell_value = st.number_input("Prix moyen vente batterie (EUR/MWh)", value=90.0, step=1.0)
-    else:
+    elif batt_sell_mode == "Upload CSV 8760":
         batt_sell_upload = st.file_uploader("Upload prix vente batterie CSV (8760 lignes)", type=["csv"], key="batt_sell")
 
     st.subheader("Buy Price - BESS/Grid")
-    grid_mode = st.radio("Source du prix d'achat réseau", ["Identique au prix vente batterie", "Prix moyen annuel", "Upload CSV 8760", "Spot Price Spain 2024"], horizontal=True)
+    grid_mode = st.radio(
+        "Source du prix d'achat réseau",
+        ["Identique au prix vente batterie", "Prix moyen annuel", "Upload CSV 8760", "Spot Price Spain 2024"],
+        index=3,
+        horizontal=True,
+    )
     grid_buy_value = None
     grid_buy_upload = None
     if grid_mode == "Prix moyen annuel":
@@ -2347,7 +2362,7 @@ def app():
     cur1, cur2, cur3 = st.columns(3)
 
     with cur1:
-        tso_dso_curtailment = st.radio("TSO/DSO Curtailment", ["No", "Yes"], horizontal=True)
+        tso_dso_curtailment = st.radio("TSO/DSO Curtailment", ["No", "Yes"], index=1, horizontal=True)
         tso_dso_upload = None
         tso_dso_source = "Curtailment Curve"
         if tso_dso_curtailment == "Yes":
@@ -2386,7 +2401,7 @@ def app():
         charge_battery_if_curtailment = st.radio("Charge Battery if Curtailment", ["No", "Yes"], horizontal=True) == "Yes"
         
     st.subheader("aFRR Capacity")
-    enable_afrr_capacity = st.checkbox("Activer aFRR Capacity", value=False)
+    enable_afrr_capacity = st.checkbox("Activer aFRR Capacity", value=True)
 
     afrr_capacity_up_upload = None
     afrr_capacity_down_upload = None
@@ -2452,7 +2467,7 @@ def app():
             afrr_capacity_end_hour = st.slider("Fin aFRR Capacity", 0, 23, 8)
 
     st.subheader("aFRR Energy")
-    enable_afrr = st.checkbox("Activer aFRR Energy", value=False)
+    enable_afrr = st.checkbox("Activer aFRR Energy", value=True)
     allow_afrr_energy_without_capacity = st.checkbox(
         "Allow aFRR energy without aFRR capacity",
         value=True,
