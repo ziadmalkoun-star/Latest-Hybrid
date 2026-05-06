@@ -3091,7 +3091,7 @@ def app():
             ]
             labels = ["PV direct", "Vente batterie", "Coût charge réseau", "SS nuit", "aFRR net", "aFRR Capacity", "PV-only"]
             ax1.bar(labels, bars)
-            ax1.set_title("Décomposition des revenus")
+            ax1.set_title("Revenue Breakdown")
             ax1.set_ylabel("EUR")
             ax1.tick_params(axis="x", rotation=20)
             st.pyplot(fig1)
@@ -3107,13 +3107,13 @@ def app():
             bess_vals = monthly_df["bess_revenue_keur_per_mw"].to_numpy(dtype=float) - afrr_vals - afrr_capacity_vals
 
             ax2.bar(x, bess_vals, width=0.65, color="green", label="BESS")
-            ax2.bar(x, afrr_vals, width=0.65, bottom=bess_vals, color="blue", label="aFRR")
+            ax2.bar(x, afrr_vals, width=0.65, bottom=bess_vals, color="blue", label="aFRR Energy")
             ax2.bar(x, afrr_capacity_vals, width=0.65, bottom=bess_vals + afrr_vals, label="aFRR Capacity")
             ax2.bar(x, pv_vals, width=0.65, bottom=bess_vals + afrr_vals + afrr_capacity_vals, color="orange", label="PV")
 
-            ax2.set_title("Revenus mensuels spécifiques superposés")
-            ax2.set_ylabel("kEUR/MW")
-            ax2.set_xlabel("Mois")
+            ax2.set_title("Specific Monthly Revenues per MW")
+            ax2.set_ylabel("k€/MW")
+            ax2.set_xlabel("Month")
             ax2.set_xticks(x)
             ax2.set_xticklabels(monthly_df["month"], rotation=45)
             ax2.legend()
@@ -3638,9 +3638,9 @@ def app():
                 label="PV-only Project"
             )
 
-            ax5.set_title("Revenus mensuels spécifiques énergie")
-            ax5.set_ylabel("EUR/MWh")
-            ax5.set_xlabel("Mois")
+            ax5.set_title("Specific Monthly Revenues per MWh")
+            ax5.set_ylabel("€/MWh")
+            ax5.set_xlabel("Month")
             ax5.set_xticks(x)
             ax5.set_xticklabels(monthly_df["month"], rotation=45)
             ax5.legend()
