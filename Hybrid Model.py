@@ -414,9 +414,12 @@ def read_monthly_curtailment_excel(uploaded_file) -> np.ndarray:
 
     filename = getattr(uploaded_file, "name", "").lower()
     if filename.endswith(".csv"):
-        df = pd.read_csv(uploaded_file, header=None, sep=None, engine="python")
-    else:
-        df = pd.read_excel(uploaded_file, header=None)
+        # Robust CSV path: the embedded fallback and many user files are simple
+        # single-column CSVs. Using pandas separator inference on a one-column
+        # decimal file can mis-detect the delimiter and return zero numeric rows.
+        return _read_single_column_csv(uploaded_file, expected_len=12)
+
+    df = pd.read_excel(uploaded_file, header=None)
     values = pd.to_numeric(df.iloc[:, 0], errors="coerce").dropna().to_numpy(dtype=float)
 
     if len(values) != 12:
