@@ -2097,6 +2097,7 @@ def app():
     col1, col2, col3 = st.columns(3)
 
     with col1:
+        st.subheader("BESS Parameters")
         batt_power_mw = st.number_input("BESS Usable Power (MW)", min_value=0.0, value=50.0, step=1.0)
         batt_energy_mwh = st.number_input("BESS Usable Capacity (MWh)", min_value=0.0, value=200.0, step=1.0)
         eta_charge = st.number_input("BESS Charging Efficiency (%)", min_value=1.0, max_value=100.0, value=95.0, step=0.5) / 100.0
