@@ -2456,19 +2456,19 @@ def app():
                 "% of Certified Capacity for aFRR",
                 min_value=0.0,
                 max_value=100.0,
-                value=100.0,
+                value=50.0,
                 step=1.0,
             )
             afrr_capacity_min_price_up = st.number_input(
                 "Minimum Price for aFRR Capacity Up (€/MW/h)",
                 min_value=0.0,
-                value=0.0,
+                value=10.0,
                 step=1.0,
             )
             afrr_capacity_min_price_down = st.number_input(
                 "Minimum Price for aFRR Capacity Down (€/MW/h)",
                 min_value=0.0,
-                value=0.0,
+                value=10.0,
                 step=1.0,
             )
 
