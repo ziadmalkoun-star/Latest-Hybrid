@@ -2405,7 +2405,7 @@ def app():
                 ppa_price = st.number_input("PPA Price (EUR/MWh)", value=50.0, step=1.0)
 
     with cur3:
-        charge_battery_if_curtailment = st.radio("Charge Battery if Curtailment", ["No", "Yes"], horizontal=True) == "Yes"
+        charge_battery_if_curtailment = st.radio("Charge Battery if Curtailment", ["No", "Yes"], horizontal=True) == "No"
         
     st.subheader("aFRR Capacity")
     enable_afrr_capacity = st.checkbox("Activer aFRR Capacity", value=True)
