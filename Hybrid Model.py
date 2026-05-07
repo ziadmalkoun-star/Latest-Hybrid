@@ -2513,7 +2513,7 @@ def app():
                 afrr_discharge_upload = st.file_uploader("Upload prix aFRR décharge CSV (35040 lignes)", type=["csv"], key="afrr_discharge")
 
         with c_afrr2:
-            afrr_min_spread = st.number_input("Spread minimum aFRR net (EUR/MWh)", min_value=0.0, value=10.0, step=1.0)
+            afrr_min_spread = st.number_input("Spread minimum aFRR net (EUR/MWh)", min_value=0.0, value=0.0, step=1.0)
             afrr_cycle_cost = st.number_input("Coût de cycle aFRR (EUR/MWh)", min_value=0.0, value=float(cycle_cost), step=1.0)
             afrr_energy_down_activation_pct = st.number_input("aFRR Energy Down Activation (%)", min_value=0.0, max_value=100.0, value=100.0, step=1.0)
             afrr_energy_up_activation_pct = st.number_input("aFRR Energy Up Activation (%)", min_value=0.0, max_value=100.0, value=100.0, step=1.0)
@@ -3413,15 +3413,13 @@ def app():
             fig2, ax2 = plt.subplots(figsize=(9, 4.8))
 
             x = np.arange(len(monthly_df))
-            pv_vals = monthly_df["pv_revenue_keur_per_mw"].to_numpy(dtype=float)
             afrr_vals = monthly_df["afrr_net_revenue"].to_numpy(dtype=float) / max(batt_power_mw, 1e-12) / 1000.0
             afrr_capacity_vals = monthly_df["afrr_capacity_total_revenue"].to_numpy(dtype=float) / max(batt_power_mw, 1e-12) / 1000.0 if "afrr_capacity_total_revenue" in monthly_df.columns else np.zeros(len(monthly_df))
             bess_vals = monthly_df["bess_revenue_keur_per_mw"].to_numpy(dtype=float) - afrr_vals - afrr_capacity_vals
 
-            ax2.bar(x, bess_vals, width=0.65, color="green", label="BESS")
+            ax2.bar(x, bess_vals, width=0.65, color="green", label="DA Arbitrage")
             ax2.bar(x, afrr_vals, width=0.65, bottom=bess_vals, color="blue", label="aFRR Energy")
             ax2.bar(x, afrr_capacity_vals, width=0.65, bottom=bess_vals + afrr_vals, label="aFRR Capacity")
-            ax2.bar(x, pv_vals, width=0.65, bottom=bess_vals + afrr_vals + afrr_capacity_vals, color="orange", label="PV")
 
             ax2.set_title("Specific Monthly Revenues per MW")
             ax2.set_ylabel("k€/MW")
