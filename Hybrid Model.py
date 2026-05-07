@@ -1682,11 +1682,14 @@ def reconcile_wholesale_afrr_dispatch_qh(
                 corrected_afrr_discharge_qh[t] = 0.0
             elif capacity_market == "up":
                 corrected_afrr_charge_qh[t] = 0.0
-        elif inputs.enable_afrr_capacity:
+        elif inputs.enable_afrr_capacity and not inputs.allow_afrr_energy_without_capacity:
+            # If aFRR Energy without awarded Capacity is not allowed, remove all aFRR Energy
+            # in quarter-hours where the battery did not receive an aFRR Capacity award.
             corrected_afrr_charge_qh[t] = 0.0
             corrected_afrr_discharge_qh[t] = 0.0
         else:
             # Mode 2: aFRR and wholesale compete as routes for the same physical battery.
+            # This branch also allows aFRR Energy without Capacity when the checkbox is ticked.
             if corrected_afrr_charge_qh[t] > 1e-12:
                 if afrr_charge_price_qh[t] < grid_buy_price_qh[t]:
                     corrected_wholesale_grid_charge_qh[t] = 0.0
