@@ -2204,6 +2204,91 @@ def build_inputs_dataframe(inputs: SimulationInputs) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["Parameter", "Value"])
 
 
+
+def build_technical_performance_df(
+    idx: pd.DatetimeIndex,
+    batt_energy_mwh: float,
+    batt_power_mw: float,
+    availability_pct: float,
+    degraded_bess_energy_by_year_mwh: np.ndarray | None = None,
+) -> pd.DataFrame:
+    """Build daily BESS technical availability outputs for the dashboard and Excel export.
+
+    Energy availability is based on the year-1 degraded BESS energy capacity.
+    Power availability is based on the power plant availability input.
+    """
+    if degraded_bess_energy_by_year_mwh is not None and len(degraded_bess_energy_by_year_mwh) > 0:
+        available_energy_mwh = float(degraded_bess_energy_by_year_mwh[0])
+    else:
+        available_energy_mwh = float(batt_energy_mwh)
+
+    available_power_mw = float(batt_power_mw) * float(availability_pct) / 100.0
+    energy_availability_pct = 100.0 * available_energy_mwh / max(float(batt_energy_mwh), 1e-12)
+    power_availability_pct = 100.0 * available_power_mw / max(float(batt_power_mw), 1e-12)
+
+    daily_idx = pd.date_range(idx.min().normalize(), idx.max().normalize(), freq="D")
+    return pd.DataFrame({
+        "date": daily_idx,
+        "total_available_energy_capacity_nominal_power_mwh": np.full(len(daily_idx), available_energy_mwh),
+        "available_power_inverter_level_mw": np.full(len(daily_idx), available_power_mw),
+        "mwh_availability_pct": np.full(len(daily_idx), energy_availability_pct),
+        "mw_availability_pct": np.full(len(daily_idx), power_availability_pct),
+    })
+
+
+def display_technical_performance(technical_df: pd.DataFrame) -> None:
+    """Render the BESS technical performance KPI block and daily availability charts."""
+    if technical_df is None or technical_df.empty:
+        return
+
+    avg_energy_mwh = float(technical_df["total_available_energy_capacity_nominal_power_mwh"].mean())
+    avg_power_mw = float(technical_df["available_power_inverter_level_mw"].mean())
+    avg_energy_pct = float(technical_df["mwh_availability_pct"].mean())
+    avg_power_pct = float(technical_df["mw_availability_pct"].mean())
+
+    st.subheader("Technical performance")
+    c1, c2 = st.columns(2)
+    c1.metric("Average Total Available Energy Capacity At Nominal Power", f"{avg_energy_mwh:,.2f} MWh")
+    c2.metric("Average Available Power At Inverter Level", f"{avg_power_mw:,.2f} MW")
+    c3, c4 = st.columns(2)
+    c3.metric("Average Total Available Energy Capacity At Nominal Power Available", f"{avg_energy_pct:,.2f}%")
+    c4.metric("Average Available Power At Inverter Level", f"{avg_power_pct:,.2f}%")
+
+    plot_df = technical_df.copy()
+    plot_df["date"] = pd.to_datetime(plot_df["date"])
+
+    left, right = st.columns(2)
+    with left:
+        fig, ax1 = plt.subplots(figsize=(8, 4))
+        ax1.plot(plot_df["date"], plot_df["total_available_energy_capacity_nominal_power_mwh"], label="Total Available Energy Capacity at nominal power")
+        ax1.set_ylabel("MWh")
+        ax1.grid(True, alpha=0.3)
+        ax2 = ax1.twinx()
+        ax2.plot(plot_df["date"], plot_df["available_power_inverter_level_mw"], label="Available power at inverter level")
+        ax2.set_ylabel("MW")
+        ax1.set_title("Daily availability in MW and MWh")
+        ax1.xaxis.set_major_formatter(mdates.DateFormatter("%b %d, %Y"))
+        fig.autofmt_xdate(rotation=45)
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc="lower left", fontsize=8)
+        st.pyplot(fig)
+        plt.close(fig)
+
+    with right:
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.plot(plot_df["date"], plot_df["mwh_availability_pct"], label="MWh availability")
+        ax.plot(plot_df["date"], plot_df["mw_availability_pct"], label="MW availability")
+        ax.set_ylabel("%")
+        ax.set_ylim(0, 105)
+        ax.grid(True, alpha=0.3)
+        ax.set_title("Daily Availability in %")
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d, %Y"))
+        fig.autofmt_xdate(rotation=45)
+        ax.legend(loc="lower left", fontsize=8)
+        st.pyplot(fig)
+        plt.close(fig)
+
 def to_excel_bytes(
     inputs_df: pd.DataFrame,
     summary_df: pd.DataFrame,
@@ -2213,6 +2298,7 @@ def to_excel_bytes(
     afrr_daily_log_df: pd.DataFrame | None = None,
     afrr_capacity_df: pd.DataFrame | None = None,
     bess_degradation_df: pd.DataFrame | None = None,
+    technical_performance_df: pd.DataFrame | None = None,
 ) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -2232,6 +2318,9 @@ def to_excel_bytes(
 
         if bess_degradation_df is not None:
             bess_degradation_df.to_excel(writer, sheet_name="BESS_Degradation", index=False)
+
+        if technical_performance_df is not None:
+            technical_performance_df.to_excel(writer, sheet_name="Technical_Performance", index=False)
 
     return output.getvalue()
 
@@ -3187,6 +3276,14 @@ def app():
             "battery_blocked_by_afrr_capacity": final_result["battery_blocked_by_afrr_capacity"] if "battery_blocked_by_afrr_capacity" in final_result else np.zeros(HOURS_PER_YEAR, dtype=int),
         })
 
+        technical_performance_df = build_technical_performance_df(
+            idx=idx,
+            batt_energy_mwh=batt_energy_mwh,
+            batt_power_mw=batt_power_mw,
+            availability_pct=availability_pct,
+            degraded_bess_energy_by_year_mwh=degraded_bess_energy_by_year_mwh,
+        )
+
         inputs_df = build_inputs_dataframe(sim_inputs)
         excel_bytes = to_excel_bytes(
             inputs_df=inputs_df,
@@ -3197,6 +3294,7 @@ def app():
             afrr_daily_log_df=afrr_result["afrr_daily_log"] if afrr_result is not None else None,
             afrr_capacity_df=afrr_capacity_df if enable_afrr_capacity else None,
             bess_degradation_df=bess_degradation_df,
+            technical_performance_df=technical_performance_df,
         )
 
         end_time = time.time()
@@ -3226,6 +3324,8 @@ def app():
         k2.metric("Énergie totale vendue", f"{total_energy_display:,.0f} MWh")
         k3.metric("Énergie shiftée", f"{final_result['energy_shifted_mwh'][0]:,.0f} MWh")
         k4.metric("Cycles équivalents", f"{final_result['equivalent_cycles'][0]:,.1f}")
+
+        display_technical_performance(technical_performance_df)
 
         st.subheader("Synthèse")
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
