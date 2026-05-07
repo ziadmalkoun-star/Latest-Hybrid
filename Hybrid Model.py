@@ -2408,7 +2408,7 @@ def app():
         charge_battery_if_curtailment = st.radio("Charge Battery if Curtailment", ["Yes", "No"], horizontal=True) == "Yes"
         
     st.subheader("aFRR Capacity")
-    enable_afrr_capacity = st.checkbox("Activer aFRR Capacity", value=True)
+    enable_afrr_capacity = st.checkbox("Activer aFRR Capacity", value=False)
 
     afrr_capacity_up_upload = None
     afrr_capacity_down_upload = None
@@ -2474,7 +2474,7 @@ def app():
             afrr_capacity_end_hour = st.slider("Fin aFRR Capacity", 0, 23, 8)
 
     st.subheader("aFRR Energy")
-    enable_afrr = st.checkbox("Activer aFRR Energy", value=True)
+    enable_afrr = st.checkbox("Activer aFRR Energy", value=False)
     allow_afrr_energy_without_capacity = st.checkbox(
         "Allow aFRR energy without aFRR capacity",
         value=True,
