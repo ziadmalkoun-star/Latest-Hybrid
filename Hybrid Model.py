@@ -3421,8 +3421,8 @@ def app():
             bess_vals = monthly_df["bess_revenue_keur_per_mw"].to_numpy(dtype=float) - afrr_vals - afrr_capacity_vals
 
             ax2.bar(x, bess_vals, width=0.65, color="lightgreen", label="DA Arbitrage")
-            ax2.bar(x, afrr_vals, width=0.65, bottom=bess_vals, color="blue", label="aFRR Energy")
             ax2.bar(x, afrr_capacity_vals, width=0.65, bottom=bess_vals + afrr_vals, label="aFRR Capacity")
+            ax2.bar(x, afrr_vals, width=0.65, bottom=bess_vals, color="blue", label="aFRR Energy")
 
             ax2.set_title("BESS Specific Monthly Revenues per MW")
             ax2.set_ylabel("k€/MW")
