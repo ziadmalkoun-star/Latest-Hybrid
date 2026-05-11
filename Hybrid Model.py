@@ -2154,7 +2154,14 @@ def build_summary_table(
 
 
 def format_synthese_number(value):
-    """Format Synthèse numeric values with max 1 decimal and French-style space thousands separators."""
+    """Format Synthèse numeric values with French-style space thousands separators.
+
+    Rules:
+    - Values with absolute value >= 1 000 are rounded to the nearest whole number
+      and displayed without decimal places.
+    - Whole numbers below 1 000 are displayed without decimal places.
+    - Non-whole decimal numbers below 1 000 are displayed with max 1 decimal place.
+    """
     if value is None:
         return ""
     try:
@@ -2162,13 +2169,18 @@ def format_synthese_number(value):
             return ""
     except Exception:
         pass
-    if isinstance(value, (int, np.integer)):
-        return f"{int(value):,}".replace(",", " ")
-    if isinstance(value, (float, np.floating)):
+
+    if isinstance(value, (int, float, np.integer, np.floating)):
         numeric_value = float(value)
-        if abs(numeric_value - round(numeric_value)) < 1e-9:
+
+        if abs(numeric_value) >= 1000:
             return f"{int(round(numeric_value)):,}".replace(",", " ")
-        return f"{numeric_value:,.1f}".replace(",", " ")
+
+        if abs(numeric_value - round(numeric_value)) < 1e-9:
+            return f"{int(round(numeric_value))}"
+
+        return f"{numeric_value:.1f}"
+
     return value
 
 
@@ -3416,7 +3428,11 @@ def app():
 
         st.subheader("Synthèse")
         summary_display_df = format_synthese_table_for_display(summary_df)
-        st.dataframe(summary_display_df, use_container_width=True, hide_index=True)
+        summary_display_styler = summary_display_df.style.set_properties(
+            subset=["Valeur"],
+            **{"text-align": "right"}
+        )
+        st.dataframe(summary_display_styler, use_container_width=True, hide_index=True)
 
         debug = hourly_df[
             (hourly_df["datetime"] >= pd.Timestamp(f"{DEFAULT_YEAR}-06-01 00:00:00")) &
