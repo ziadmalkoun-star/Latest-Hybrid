@@ -1503,8 +1503,8 @@ def simulate_afrr_night_arbitrage(inputs: SimulationInputs, result_hourly: Dict[
                     soc_removed = discharge_this_qh / max(inputs.eta_discharge, 1e-12)
                     afrr_discharge_qh_mwh[t] = discharge_this_qh
                     afrr_sale_revenue_qh_eur[t] = discharge_this_qh * discharge_prices_qh[t]
-                    afrr_cycle_cost_qh_eur[t] = soc_removed * inputs.afrr_cycle_cost_eur_per_mwh
-                    afrr_net_revenue_qh_eur[t] += afrr_sale_revenue_qh_eur[t] - afrr_cycle_cost_qh_eur[t]
+                    afrr_cycle_cost_qh_eur[t] = soc_removed * inputs.afrr_cycle_cost_eur_per_mwh  # theoretical/reference only
+                    afrr_net_revenue_qh_eur[t] += afrr_sale_revenue_qh_eur[t]  # aFRR cycle cost is reference-only, not deducted from cash revenue
                     soc_current -= soc_removed
                     up_activated_qh[t] = 1
                     selected_discharge_market_qh[t] = "afrr"
@@ -1592,8 +1592,8 @@ def simulate_afrr_night_arbitrage(inputs: SimulationInputs, result_hourly: Dict[
                     soc_removed = discharge_this_qh / max(inputs.eta_discharge, 1e-12)
                     afrr_discharge_qh_mwh[t] = discharge_this_qh
                     afrr_sale_revenue_qh_eur[t] = discharge_this_qh * discharge_prices_qh[t]
-                    afrr_cycle_cost_qh_eur[t] = soc_removed * inputs.afrr_cycle_cost_eur_per_mwh
-                    afrr_net_revenue_qh_eur[t] += afrr_sale_revenue_qh_eur[t] - afrr_cycle_cost_qh_eur[t]
+                    afrr_cycle_cost_qh_eur[t] = soc_removed * inputs.afrr_cycle_cost_eur_per_mwh  # theoretical/reference only
+                    afrr_net_revenue_qh_eur[t] += afrr_sale_revenue_qh_eur[t]  # aFRR cycle cost is reference-only, not deducted from cash revenue
                     soc_current -= soc_removed
                     up_activated_qh[t] = 1
                     selected_discharge_market_qh[t] = "afrr"
@@ -1621,7 +1621,7 @@ def simulate_afrr_night_arbitrage(inputs: SimulationInputs, result_hourly: Dict[
                 "charge_cost_eur": charge_cost_eur_total,
                 "sale_revenue_eur": sale_revenue_eur_total,
                 "cycle_cost_eur": cycle_cost_eur_total,
-                "net_revenue_eur": sale_revenue_eur_total - charge_cost_eur_total - cycle_cost_eur_total,
+                "net_revenue_eur": sale_revenue_eur_total - charge_cost_eur_total,  # aFRR cycle cost reference-only, not deducted
                 "reason": best_trade.get("reason", "OK"),
             })
 
@@ -1808,8 +1808,10 @@ def reconcile_wholesale_afrr_dispatch_qh(
     corrected_wholesale_grid_charge_cost_qh = corrected_wholesale_grid_charge_qh * grid_buy_price_qh
     corrected_afrr_charge_cost_qh = corrected_afrr_charge_qh * afrr_charge_price_qh
     corrected_afrr_sale_revenue_qh = corrected_afrr_discharge_qh * afrr_discharge_price_qh
+    # aFRR cycle cost is kept as a theoretical degradation/reference metric only.
+    # It remains in the aFRR selection spread logic, but is not deducted from cash revenue.
     corrected_afrr_cycle_cost_qh = (corrected_afrr_discharge_qh / max(inputs.eta_discharge, 1e-12)) * inputs.afrr_cycle_cost_eur_per_mwh
-    corrected_afrr_net_revenue_qh = corrected_afrr_sale_revenue_qh - corrected_afrr_charge_cost_qh - corrected_afrr_cycle_cost_qh
+    corrected_afrr_net_revenue_qh = corrected_afrr_sale_revenue_qh - corrected_afrr_charge_cost_qh  # aFRR cycle cost reference-only, not deducted
 
     charge_to_soc_qh = (
         corrected_wholesale_pv_to_batt_qh
