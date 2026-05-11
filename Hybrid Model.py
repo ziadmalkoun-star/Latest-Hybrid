@@ -2349,7 +2349,7 @@ def app():
         final_soc = st.number_input("BESS EoL SOC (MWh)", min_value=0.0, value=effective_batt_energy_mwh*min_soc_pct/100, step=1.0)
         bess_capture_rate_pct = st.number_input("BESS Capture Rate (%)", min_value=0.0, max_value=100.0, value=100.0, step=1.0)
         max_cycles_per_year = st.number_input("Max Cycles / year", min_value=0.0, value=547.0, step=0.1)
-        cycle_cost = st.number_input("BESS Cycle Cost (EUR/MWh)", value=5.0)
+        cycle_cost = st.number_input("BESS Cycle Cost (EUR/MWh)", value=0.0)
         charge_quantile = st.slider("Charge Percentile (%)", 0, 100, 100)
         discharge_quantile = st.slider("Discharge Percentile (%)", 0, 100, 0)
         min_spread_arbitrage = st.number_input("Minimum Spread for Arbitrage (EUR/MWh)", min_value=0.0, value=10.0, step=1.0)
