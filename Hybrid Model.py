@@ -2298,7 +2298,7 @@ def app():
     with col2:
         st.subheader("PV Parameters")
         pv_dc_mw = st.number_input("PV DC Power (MWc)", min_value=0.0, value=100.0, step=1.0)
-        productible = st.number_input("PV Yield (kWh/kWc/an)", min_value=0.0, value=1200.0, step=10.0)
+        productible = st.number_input("PV Yield (kWh/kWc/an)", min_value=0.0, value=1500.0, step=10.0)
         availability_pct = st.number_input("PV Availability (%)", min_value=0.0, max_value=100.0, value=100.0, step=0.1)
         pv_losses_pct = st.number_input("PV System Losses (%)", min_value=0.0, max_value=100.0, value=8.0, step=0.5)
         pv_capture_rate_pct = st.number_input("PV Capture Rate (%)", min_value=0.0, max_value=100.0, value=100.0, step=1.0)
