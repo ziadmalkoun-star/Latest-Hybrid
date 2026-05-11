@@ -73,6 +73,10 @@ class SimulationInputs:
     # PV curtailed but optionally recoverable into battery only
     curtailed_pv_recoverable_mwh: np.ndarray | None = None
 
+    # BESS availability reporting: batt_energy_mwh is the effective available capacity used by the model.
+    nominal_batt_energy_mwh: float = 0.0
+    bess_availability_pct: float = 100.0
+
     nightly_bess_revenue_eur: float = 0.0
     soc_steps: int = 101
     initial_soc_mwh: float = 0.0
@@ -2144,7 +2148,9 @@ def monthly_dataframe(
 def build_inputs_dataframe(inputs: SimulationInputs) -> pd.DataFrame:
     rows = [
         ("batt_power_mw", inputs.batt_power_mw),
-        ("batt_energy_mwh", inputs.batt_energy_mwh),
+        ("nominal_batt_energy_mwh", inputs.nominal_batt_energy_mwh),
+        ("bess_availability_pct", inputs.bess_availability_pct),
+        ("effective_batt_energy_mwh", inputs.batt_energy_mwh),
         ("pv_dc_mw", inputs.pv_dc_mw),
         ("productible_kwh_per_kwp", inputs.productible_kwh_per_kwp),
         ("pv_losses_pct", inputs.pv_losses_pct),
@@ -2264,12 +2270,15 @@ def app():
         st.subheader("BESS Parameters")
         batt_power_mw = st.number_input("BESS Usable Power (MW)", min_value=0.0, value=50.0, step=1.0)
         batt_energy_mwh = st.number_input("BESS Usable Capacity (MWh)", min_value=0.0, value=200.0, step=1.0)
+        bess_availability_pct = st.number_input("BESS Availability (%)", min_value=0.0, max_value=100.0, value=98.0, step=0.1)
+        effective_batt_energy_mwh = batt_energy_mwh * bess_availability_pct / 100.0
+        st.caption(f"Effective BESS usable capacity: {effective_batt_energy_mwh:.2f} MWh")
         eta_charge = st.number_input("BESS Charging Efficiency (%)", min_value=1.0, max_value=100.0, value=95.0, step=0.5) / 100.0
         eta_discharge = st.number_input("BESS Discharging Efficiency (%)", min_value=1.0, max_value=100.0, value=95.0, step=0.5) / 100.0
         min_soc_pct = st.slider("BESS Minimum SOC (%)", 0, 100, 20)
         max_soc_pct = st.slider("BESS Maximum SOC (%)", 0, 100, 90)
-        initial_soc = st.number_input("BESS BoL SOC (MWh)", min_value=0.0, value=batt_energy_mwh*max_soc_pct/100, step=1.0)
-        final_soc = st.number_input("BESS EoL SOC (MWh)", min_value=0.0, value=batt_energy_mwh*min_soc_pct/100, step=1.0)
+        initial_soc = st.number_input("BESS BoL SOC (MWh)", min_value=0.0, value=effective_batt_energy_mwh*max_soc_pct/100, step=1.0)
+        final_soc = st.number_input("BESS EoL SOC (MWh)", min_value=0.0, value=effective_batt_energy_mwh*min_soc_pct/100, step=1.0)
         bess_capture_rate_pct = st.number_input("BESS Capture Rate (%)", min_value=0.0, max_value=100.0, value=100.0, step=1.0)
         max_cycles_per_year = st.number_input("Max Cycles / year", min_value=0.0, value=547.0, step=0.1)
         cycle_cost = st.number_input("BESS Cycle Cost (EUR/MWh)", value=5.0)
@@ -2535,12 +2544,12 @@ def app():
     start_time = time.time()
 
     try:
-        if batt_energy_mwh < batt_power_mw and batt_energy_mwh > 0:
+        if effective_batt_energy_mwh < batt_power_mw and effective_batt_energy_mwh > 0:
             st.warning("Attention : la capacité batterie est inférieure à 1h de puissance. C'est possible, mais atypique.")
-        if initial_soc > batt_energy_mwh:
+        if initial_soc > effective_batt_energy_mwh:
             st.error("Le SOC initial ne peut pas dépasser la capacité batterie.")
             return
-        if final_soc > batt_energy_mwh:
+        if final_soc > effective_batt_energy_mwh:
             st.error("Le SOC final ne peut pas dépasser la capacité batterie.")
             return
         if not (0.0 <= min_soc_pct <= 100.0):
@@ -2553,8 +2562,8 @@ def app():
             st.error("Minimum SOC batterie (%) doit être strictement inférieur au Maximum SOC batterie (%).")
             return
 
-        min_soc_mwh = batt_energy_mwh * min_soc_pct / 100.0
-        max_soc_mwh = batt_energy_mwh * max_soc_pct / 100.0
+        min_soc_mwh = effective_batt_energy_mwh * min_soc_pct / 100.0
+        max_soc_mwh = effective_batt_energy_mwh * max_soc_pct / 100.0
 
         if initial_soc < min_soc_mwh or initial_soc > max_soc_mwh:
             st.error(
@@ -2598,7 +2607,7 @@ def app():
             bess_degradation_curve_pct, degraded_bess_energy_by_year_mwh, bess_degradation_df = read_bess_degradation_excel(
                 bess_degradation_upload,
                 project_lifetime_years,
-                batt_energy_mwh,
+                effective_batt_energy_mwh,
             )
         except Exception as e:
             st.error(f"Erreur courbe de dégradation BESS: {e}")
@@ -2819,7 +2828,9 @@ def app():
             )
         sim_inputs = SimulationInputs(
             batt_power_mw=batt_power_mw,
-            batt_energy_mwh=batt_energy_mwh,
+            batt_energy_mwh=effective_batt_energy_mwh,
+            nominal_batt_energy_mwh=batt_energy_mwh,
+            bess_availability_pct=bess_availability_pct,
             pv_dc_mw=pv_dc_mw,
             productible_kwh_per_kwp=productible,
             pv_losses_pct=pv_losses_pct,
@@ -3226,6 +3237,12 @@ def app():
         k2.metric("Énergie totale vendue", f"{total_energy_display:,.0f} MWh")
         k3.metric("Énergie shiftée", f"{final_result['energy_shifted_mwh'][0]:,.0f} MWh")
         k4.metric("Cycles équivalents", f"{final_result['equivalent_cycles'][0]:,.1f}")
+
+        st.subheader("BESS availability")
+        b1, b2, b3 = st.columns(3)
+        b1.metric("Nominal BESS Energy Capacity", f"{batt_energy_mwh:,.2f} MWh")
+        b2.metric("BESS Availability", f"{bess_availability_pct:,.1f} %")
+        b3.metric("Effective BESS Energy Capacity", f"{effective_batt_energy_mwh:,.2f} MWh")
 
         st.subheader("Synthèse")
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
