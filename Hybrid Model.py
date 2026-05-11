@@ -1501,10 +1501,17 @@ def simulate_afrr_night_arbitrage(inputs: SimulationInputs, result_hourly: Dict[
                 )
                 if discharge_this_qh > 1e-12:
                     soc_removed = discharge_this_qh / max(inputs.eta_discharge, 1e-12)
+                    theoretical_cycle_cost = soc_removed * inputs.afrr_cycle_cost_eur_per_mwh
+                    expected_sale_revenue = discharge_this_qh * discharge_prices_qh[t]
+                    # Reference-only aFRR cycle-cost hurdle: skip activation if the
+                    # activation value does not cover the theoretical degradation cost.
+                    # The cost is NOT deducted from reported cash revenue when accepted.
+                    if expected_sale_revenue <= theoretical_cycle_cost + 1e-12:
+                        continue
                     afrr_discharge_qh_mwh[t] = discharge_this_qh
-                    afrr_sale_revenue_qh_eur[t] = discharge_this_qh * discharge_prices_qh[t]
-                    afrr_cycle_cost_qh_eur[t] = soc_removed * inputs.afrr_cycle_cost_eur_per_mwh  # theoretical/reference only
-                    afrr_net_revenue_qh_eur[t] += afrr_sale_revenue_qh_eur[t]  # aFRR cycle cost is reference-only, not deducted from cash revenue
+                    afrr_sale_revenue_qh_eur[t] = expected_sale_revenue
+                    afrr_cycle_cost_qh_eur[t] = theoretical_cycle_cost
+                    afrr_net_revenue_qh_eur[t] += afrr_sale_revenue_qh_eur[t]  # aFRR cycle cost is a decision/reference metric only, not deducted from cash revenue
                     soc_current -= soc_removed
                     up_activated_qh[t] = 1
                     selected_discharge_market_qh[t] = "afrr"
@@ -1526,7 +1533,7 @@ def simulate_afrr_night_arbitrage(inputs: SimulationInputs, result_hourly: Dict[
             "sale_revenue_eur": float(afrr_sale_revenue_qh_eur.sum()),
             "cycle_cost_eur": float(afrr_cycle_cost_qh_eur.sum()),
             "net_revenue_eur": float(afrr_net_revenue_qh_eur.sum()),
-            "reason": "Capacity directional activation; no minimum spread applied.",
+            "reason": "Capacity directional activation; aFRR cycle cost used as reference hurdle on upward activation, not deducted from cash revenue.",
         })
 
     else:
@@ -1590,10 +1597,17 @@ def simulate_afrr_night_arbitrage(inputs: SimulationInputs, result_hourly: Dict[
                     if discharge_this_qh <= 1e-12:
                         continue
                     soc_removed = discharge_this_qh / max(inputs.eta_discharge, 1e-12)
+                    theoretical_cycle_cost = soc_removed * inputs.afrr_cycle_cost_eur_per_mwh
+                    expected_sale_revenue = discharge_this_qh * discharge_prices_qh[t]
+                    # Reference-only aFRR cycle-cost hurdle: skip activation if the
+                    # activation value does not cover the theoretical degradation cost.
+                    # The cost is NOT deducted from reported cash revenue when accepted.
+                    if expected_sale_revenue <= theoretical_cycle_cost + 1e-12:
+                        continue
                     afrr_discharge_qh_mwh[t] = discharge_this_qh
-                    afrr_sale_revenue_qh_eur[t] = discharge_this_qh * discharge_prices_qh[t]
-                    afrr_cycle_cost_qh_eur[t] = soc_removed * inputs.afrr_cycle_cost_eur_per_mwh  # theoretical/reference only
-                    afrr_net_revenue_qh_eur[t] += afrr_sale_revenue_qh_eur[t]  # aFRR cycle cost is reference-only, not deducted from cash revenue
+                    afrr_sale_revenue_qh_eur[t] = expected_sale_revenue
+                    afrr_cycle_cost_qh_eur[t] = theoretical_cycle_cost
+                    afrr_net_revenue_qh_eur[t] += afrr_sale_revenue_qh_eur[t]  # aFRR cycle cost is a decision/reference metric only, not deducted from cash revenue
                     soc_current -= soc_removed
                     up_activated_qh[t] = 1
                     selected_discharge_market_qh[t] = "afrr"
@@ -1808,8 +1822,6 @@ def reconcile_wholesale_afrr_dispatch_qh(
     corrected_wholesale_grid_charge_cost_qh = corrected_wholesale_grid_charge_qh * grid_buy_price_qh
     corrected_afrr_charge_cost_qh = corrected_afrr_charge_qh * afrr_charge_price_qh
     corrected_afrr_sale_revenue_qh = corrected_afrr_discharge_qh * afrr_discharge_price_qh
-    # aFRR cycle cost is kept as a theoretical degradation/reference metric only.
-    # It remains in the aFRR selection spread logic, but is not deducted from cash revenue.
     corrected_afrr_cycle_cost_qh = (corrected_afrr_discharge_qh / max(inputs.eta_discharge, 1e-12)) * inputs.afrr_cycle_cost_eur_per_mwh
     corrected_afrr_net_revenue_qh = corrected_afrr_sale_revenue_qh - corrected_afrr_charge_cost_qh  # aFRR cycle cost reference-only, not deducted
 
