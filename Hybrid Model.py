@@ -2192,49 +2192,6 @@ def format_synthese_table_for_display(summary_df: pd.DataFrame) -> pd.DataFrame:
     return display_df
 
 
-def render_synthese_table(summary_df: pd.DataFrame) -> None:
-    """Render the Synthèse table with formatted values and right-aligned numeric outputs.
-
-    st.dataframe does not reliably apply pandas Styler text alignment in every
-    Streamlit/theme combination, so this table is rendered as HTML with explicit
-    CSS for the Valeur column.
-    """
-    summary_display_df = format_synthese_table_for_display(summary_df)
-    table_html = summary_display_df.to_html(index=False, escape=True, classes="synthese-table")
-    st.markdown(
-        f"""
-        <style>
-        table.synthese-table {{
-            width: 100%;
-            border-collapse: collapse;
-            border: 1px solid rgba(250, 250, 250, 0.16);
-            border-radius: 0.5rem;
-            overflow: hidden;
-        }}
-        table.synthese-table th,
-        table.synthese-table td {{
-            padding: 0.55rem 0.65rem;
-            border: 1px solid rgba(250, 250, 250, 0.12);
-            vertical-align: middle;
-        }}
-        table.synthese-table th {{
-            text-align: left;
-            font-weight: 500;
-            background-color: rgba(250, 250, 250, 0.04);
-        }}
-        table.synthese-table th:nth-child(2),
-        table.synthese-table td:nth-child(2) {{
-            text-align: right !important;
-            font-variant-numeric: tabular-nums;
-            white-space: nowrap;
-        }}
-        </style>
-        {table_html}
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 def monthly_dataframe(
     result: Dict[str, np.ndarray],
     pure_pv_benchmark: Dict[str, np.ndarray],
@@ -3470,7 +3427,12 @@ def app():
         b3.metric("Effective BESS Energy Capacity", f"{effective_batt_energy_mwh:,.2f} MWh")
 
         st.subheader("Synthèse")
-        render_synthese_table(summary_df)
+        summary_display_df = format_synthese_table_for_display(summary_df)
+        summary_display_styler = summary_display_df.style.set_properties(
+            subset=["Valeur"],
+            **{"text-align": "right"}
+        )
+        st.dataframe(summary_display_styler, use_container_width=True, hide_index=True)
 
         debug = hourly_df[
             (hourly_df["datetime"] >= pd.Timestamp(f"{DEFAULT_YEAR}-06-01 00:00:00")) &
