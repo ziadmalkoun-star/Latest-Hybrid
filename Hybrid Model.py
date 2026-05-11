@@ -534,7 +534,7 @@ def simulate_afrr_capacity(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
     }
 
 
-def build_standard_spain_solar_profile() -> np.ndarray:
+def build_standard_france_solar_profile() -> np.ndarray:
     idx = pd.date_range(f"{DEFAULT_YEAR}-01-01 00:00:00", periods=HOURS_PER_YEAR, freq="h")
     doy = idx.dayofyear.to_numpy()
     hour = idx.hour.to_numpy()
@@ -2315,7 +2315,7 @@ def app():
             ppa_price_standalone = st.number_input("PPA Price (€/MWh)", value=50.0, step=1.0)
             
     st.subheader("Courbe solaire 8760h")
-    solar_mode = st.radio("Source du profil solaire", ["Courbe standard Spain", "Upload CSV 8760"], horizontal=True)
+    solar_mode = st.radio("Source du profil solaire", ["Courbe standard France", "Upload CSV 8760"], horizontal=True)
 
     solar_upload = None
     uploaded_solar_is_relative = True
@@ -2605,8 +2605,8 @@ def app():
             return
             
         # Base PV
-        if solar_mode == "Courbe standard Spain":
-            solar_relative = build_standard_spain_solar_profile()
+        if solar_mode == "Courbe standard France":
+            solar_relative = build_standard_france_solar_profile()
             base_pv_hourly_mwh, pv_stats = build_pv_generation_mwh(
                 solar_relative, pv_dc_mw, productible, pv_losses_pct, availability_pct
             )
