@@ -1063,6 +1063,8 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
             pv_direct_revenue[t] = pv_direct[t] * pv_price[t]
             batt_sale_revenue[t] = discharge[t] * batt_sell[t]
             grid_charge_cost[t] = grid_charge[t] * grid_buy[t]
+            # Option A: cycle cost is a dispatch hurdle and an informational theoretical degradation metric only.
+            # It is NOT deducted from cash revenue.
             wholesale_cycle_cost[t] = discharge[t] * inputs.cycle_cost_eur_per_mwh
             state = next_state
 
@@ -1071,7 +1073,7 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
         total_grid_charge_cost = float(grid_charge_cost.sum())
         total_wholesale_cycle_cost = float(wholesale_cycle_cost.sum())
         nightly_revenue_total = float(inputs.nightly_bess_revenue_eur * (T // 24))
-        total_revenue = total_direct_pv_revenue + total_batt_sale_revenue - total_grid_charge_cost - total_wholesale_cycle_cost + nightly_revenue_total
+        total_revenue = total_direct_pv_revenue + total_batt_sale_revenue - total_grid_charge_cost + nightly_revenue_total
         total_discharged_mwh = float(discharge.sum())
         equivalent_cycles = total_discharged_mwh / max(inputs.batt_energy_mwh, 1e-12)
         remaining_cycle_budget_mwh = max(max_annual_discharge_mwh - total_discharged_mwh, 0.0)
@@ -1092,7 +1094,8 @@ def optimize_dispatch_dp(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
             "total_grid_charge_cost": np.array([total_grid_charge_cost]),
             "total_wholesale_cycle_cost_eur": np.array([total_wholesale_cycle_cost]),
             "gross_bess_revenue_before_cycle_cost_eur": np.array([total_batt_sale_revenue]),
-            "net_bess_revenue_after_cycle_cost_eur": np.array([total_batt_sale_revenue - total_grid_charge_cost - total_wholesale_cycle_cost + nightly_revenue_total]),
+            "net_bess_revenue_after_cycle_cost_eur": np.array([total_batt_sale_revenue - total_grid_charge_cost + nightly_revenue_total]),
+            "bess_cash_revenue_eur": np.array([total_batt_sale_revenue - total_grid_charge_cost + nightly_revenue_total]),
             "nightly_revenue_total": np.array([nightly_revenue_total]),
             "total_revenue": np.array([total_revenue]),
             "equivalent_cycles": np.array([equivalent_cycles]),
@@ -1880,6 +1883,7 @@ def build_final_result_after_market_arbitration(
     final["discharge"] = reconciliation["wholesale_discharge_hourly_mwh"]
     final["batt_sale_revenue"] = reconciliation["wholesale_batt_sale_revenue_hourly_eur"]
     final["grid_charge_cost"] = reconciliation["wholesale_grid_charge_cost_hourly_eur"]
+    # Option A: cycle cost is kept as a theoretical degradation metric only; it is not deducted from cash revenue.
     final["wholesale_cycle_cost_eur"] = final["discharge"] * inputs.cycle_cost_eur_per_mwh
 
     total_batt_sale_revenue = float(final["batt_sale_revenue"].sum())
@@ -1896,7 +1900,10 @@ def build_final_result_after_market_arbitration(
     final["total_wholesale_cycle_cost_eur"] = np.array([total_wholesale_cycle_cost])
     final["gross_bess_revenue_before_cycle_cost_eur"] = np.array([total_batt_sale_revenue])
     final["net_bess_revenue_after_cycle_cost_eur"] = np.array([
-        total_batt_sale_revenue - total_grid_charge_cost - total_wholesale_cycle_cost + nightly_revenue_total
+        total_batt_sale_revenue - total_grid_charge_cost + nightly_revenue_total
+    ])
+    final["bess_cash_revenue_eur"] = np.array([
+        total_batt_sale_revenue - total_grid_charge_cost + nightly_revenue_total
     ])
     final["energy_shifted_mwh"] = np.array([total_discharged_mwh])
     final["energy_sold_total_mwh"] = np.array([float(final["pv_direct"].sum() + total_discharged_mwh)])
@@ -1906,7 +1913,7 @@ def build_final_result_after_market_arbitration(
     final["remaining_cycle_budget_mwh"] = np.array([max(annual_discharge_cap_mwh - total_discharged_mwh, 0.0)])
 
     final["total_revenue"] = np.array([
-        total_direct_pv_revenue + total_batt_sale_revenue - total_grid_charge_cost - total_wholesale_cycle_cost + nightly_revenue_total
+        total_direct_pv_revenue + total_batt_sale_revenue - total_grid_charge_cost + nightly_revenue_total
     ])
 
     final["afrr_charge_hourly_mwh"] = reconciliation["afrr_charge_hourly_mwh"]
@@ -1914,19 +1921,19 @@ def build_final_result_after_market_arbitration(
     final["afrr_charge_cost_hourly_eur"] = reconciliation["afrr_charge_cost_hourly_eur"]
     final["afrr_sale_revenue_hourly_eur"] = reconciliation["afrr_sale_revenue_hourly_eur"]
     final["afrr_cycle_cost_hourly_eur"] = reconciliation["afrr_cycle_cost_hourly_eur"]
-    final["afrr_net_revenue_hourly_eur"] = reconciliation["afrr_net_revenue_hourly_eur"]
+    final["afrr_net_revenue_hourly_eur"] = final["afrr_sale_revenue_hourly_eur"] - final["afrr_charge_cost_hourly_eur"]
 
     final["total_afrr_charge_cost_eur"] = np.array([float(reconciliation["afrr_charge_cost_hourly_eur"].sum())])
     final["total_afrr_sale_revenue_eur"] = np.array([float(reconciliation["afrr_sale_revenue_hourly_eur"].sum())])
     final["total_afrr_cycle_cost_eur"] = np.array([float(reconciliation["afrr_cycle_cost_hourly_eur"].sum())])
-    final["total_afrr_net_revenue_eur"] = np.array([float(reconciliation["afrr_net_revenue_hourly_eur"].sum())])
+    final["total_afrr_net_revenue_eur"] = np.array([float(final["afrr_net_revenue_hourly_eur"].sum())])
 
     final["total_battery_revenue_including_afrr_eur"] = np.array([
-        total_batt_sale_revenue - total_grid_charge_cost - total_wholesale_cycle_cost + nightly_revenue_total + float(reconciliation["afrr_net_revenue_hourly_eur"].sum())
+        total_batt_sale_revenue - total_grid_charge_cost + nightly_revenue_total + float(final["afrr_net_revenue_hourly_eur"].sum())
     ])
 
     final["total_revenue_including_afrr_eur"] = np.array([
-        total_direct_pv_revenue + total_batt_sale_revenue - total_grid_charge_cost - total_wholesale_cycle_cost + nightly_revenue_total + float(reconciliation["afrr_net_revenue_hourly_eur"].sum())
+        total_direct_pv_revenue + total_batt_sale_revenue - total_grid_charge_cost + nightly_revenue_total + float(final["afrr_net_revenue_hourly_eur"].sum())
     ])
 
     return final
@@ -1968,7 +1975,6 @@ def add_afrr_capacity_to_final_result(
     base_battery_revenue = (
         float(final["total_batt_sale_revenue"][0])
         - float(final["total_grid_charge_cost"][0])
-        - float(final.get("total_wholesale_cycle_cost_eur", np.array([0.0]))[0])
         + float(final["nightly_revenue_total"][0])
     )
     total_direct_pv_revenue = float(final["total_direct_pv_revenue"][0])
@@ -2013,7 +2019,6 @@ def build_summary_table(
     bess_revenue_base = (
         float(result["total_batt_sale_revenue"][0])
         - float(result["total_grid_charge_cost"][0])
-        - wholesale_cycle_cost
         + float(result["nightly_revenue_total"][0])
     )
 
@@ -2081,11 +2086,11 @@ def build_summary_table(
         ("Average Raw BESS Sell Price", avg_raw_bess_sell_price, "€/MWh"),
         ("Average Effective BESS Sell Price", avg_effective_bess_sell_price, "€/MWh"),
         ("Revenue loss due to BESS capture rate", revenue_loss_capture_rate, "EUR"),
-        ("Total Cycle Cost", total_cycle_cost, "EUR"),
-        ("Cycle Cost per Year", total_cycle_cost, "EUR/an"),
+        ("Theoretical Cycle Cost (not deducted from cash revenue)", total_cycle_cost, "EUR"),
+        ("Theoretical Cycle Cost per Year (not deducted)", total_cycle_cost, "EUR/an"),
         ("Gross BESS Revenue Before Cycle Cost", gross_bess_revenue_before_cycle_cost, "EUR"),
-        ("Net BESS Revenue After Cycle Cost", net_bess_revenue_after_cycle_cost, "EUR"),
-        ("Average Cycle Cost per Discharged MWh", avg_cycle_cost_per_discharged_mwh, "EUR/MWh"),
+        ("BESS Cash Revenue (cycle cost not deducted)", net_bess_revenue_after_cycle_cost, "EUR"),
+        ("Average Theoretical Cycle Cost per Discharged MWh", avg_cycle_cost_per_discharged_mwh, "EUR/MWh"),
         ("Number of cycles without cycle cost", cycles_without_cycle_cost, "cycles/an"),
         ("Number of cycles with cycle cost", cycles_with_cycle_cost, "cycles/an"),
         ("Revenu total", total_revenue, "EUR"),
@@ -2094,11 +2099,11 @@ def build_summary_table(
         ("Revenu PV direct", pv_revenue, "EUR"),
         ("Revenu batterie wholesale", float(result["total_batt_sale_revenue"][0]), "EUR"),
         ("Coût charge réseau wholesale", float(result["total_grid_charge_cost"][0]), "EUR"),
-        ("Coût cycle wholesale", wholesale_cycle_cost, "EUR"),
+        ("Coût cycle wholesale théorique (non déduit)", wholesale_cycle_cost, "EUR"),
         ("Revenu services système de nuit", float(result["nightly_revenue_total"][0]), "EUR"),
         ("Revenu brut aFRR", afrr_sale_revenue, "EUR"),
         ("Cashflow charge aFRR", afrr_charge_cost, "EUR"),
-        ("Coût cycle aFRR", afrr_cycle_cost, "EUR"),
+        ("Coût cycle aFRR théorique (non déduit)", afrr_cycle_cost, "EUR"),
         ("Revenu net aFRR", afrr_net_revenue, "EUR"),
         ("Revenu aFRR Capacity UP", afrr_capacity_up_revenue, "EUR"),
         ("Revenu aFRR Capacity Down", afrr_capacity_down_revenue, "EUR"),
@@ -2179,7 +2184,6 @@ def monthly_dataframe(
     monthly["bess_net_revenue"] = (
         monthly["batt_sale_revenue"]
         - monthly["grid_charge_cost"]
-        - monthly["wholesale_cycle_cost"]
         + monthly["afrr_net_revenue"]
         + monthly["afrr_capacity_total_revenue"]
     )
