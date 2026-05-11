@@ -2153,6 +2153,33 @@ def build_summary_table(
     return pd.DataFrame(rows, columns=["Indicateur", "Valeur", "Unité"])
 
 
+def format_synthese_number(value):
+    """Format Synthèse numeric values with max 1 decimal and French-style space thousands separators."""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    if isinstance(value, (int, np.integer)):
+        return f"{int(value):,}".replace(",", " ")
+    if isinstance(value, (float, np.floating)):
+        numeric_value = float(value)
+        if abs(numeric_value - round(numeric_value)) < 1e-9:
+            return f"{int(round(numeric_value)):,}".replace(",", " ")
+        return f"{numeric_value:,.1f}".replace(",", " ")
+    return value
+
+
+def format_synthese_table_for_display(summary_df: pd.DataFrame) -> pd.DataFrame:
+    """Return a display-only copy of the Synthèse table with formatted numeric values."""
+    display_df = summary_df.copy()
+    if "Valeur" in display_df.columns:
+        display_df["Valeur"] = display_df["Valeur"].apply(format_synthese_number)
+    return display_df
+
+
 def monthly_dataframe(
     result: Dict[str, np.ndarray],
     pure_pv_benchmark: Dict[str, np.ndarray],
@@ -3388,7 +3415,8 @@ def app():
         b3.metric("Effective BESS Energy Capacity", f"{effective_batt_energy_mwh:,.2f} MWh")
 
         st.subheader("Synthèse")
-        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        summary_display_df = format_synthese_table_for_display(summary_df)
+        st.dataframe(summary_display_df, use_container_width=True, hide_index=True)
 
         debug = hourly_df[
             (hourly_df["datetime"] >= pd.Timestamp(f"{DEFAULT_YEAR}-06-01 00:00:00")) &
