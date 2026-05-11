@@ -2039,10 +2039,16 @@ def build_summary_table(
     max_cycles_per_year = float(result["max_cycles_per_year"][0]) if "max_cycles_per_year" in result else np.nan
     annual_discharge_cap_mwh = float(result["annual_discharge_cap_mwh"][0]) if "annual_discharge_cap_mwh" in result else np.nan
     remaining_cycle_budget_mwh = float(result["remaining_cycle_budget_mwh"][0]) if "remaining_cycle_budget_mwh" in result else np.nan
+    avg_raw_bess_sell_price = float(result["avg_raw_bess_sell_price_eur_per_mwh"][0]) if "avg_raw_bess_sell_price_eur_per_mwh" in result else np.nan
+    avg_effective_bess_sell_price = float(result["avg_effective_bess_sell_price_eur_per_mwh"][0]) if "avg_effective_bess_sell_price_eur_per_mwh" in result else np.nan
+    revenue_loss_capture_rate = float(result["bess_revenue_loss_due_to_capture_rate_eur"][0]) if "bess_revenue_loss_due_to_capture_rate_eur" in result else np.nan
 
     rows = [
         ("PV Capture Rate", pv_capture_rate_pct, "%"),
         ("BESS Capture Rate", bess_capture_rate_pct, "%"),
+        ("Average Raw BESS Sell Price", avg_raw_bess_sell_price, "€/MWh"),
+        ("Average Effective BESS Sell Price", avg_effective_bess_sell_price, "€/MWh"),
+        ("Revenue loss due to BESS capture rate", revenue_loss_capture_rate, "EUR"),
         ("Revenu total", total_revenue, "EUR"),
         ("Revenu PV-only Project", pure_pv_revenue, "EUR"),
         ("Valeur ajoutée de l'hybridation vs PV-only", hybrid_added_value, "EUR"),
@@ -2122,6 +2128,8 @@ def monthly_dataframe(
         "afrr_capacity_total_revenue": result["afrr_capacity_total_revenue_h_eur"] if "afrr_capacity_total_revenue_h_eur" in result else np.zeros(HOURS_PER_YEAR),
         "afrr_capacity_up_awarded_hours": result["afrr_capacity_up_awarded_h"] if "afrr_capacity_up_awarded_h" in result else np.zeros(HOURS_PER_YEAR),
         "afrr_capacity_down_awarded_hours": result["afrr_capacity_down_awarded_h"] if "afrr_capacity_down_awarded_h" in result else np.zeros(HOURS_PER_YEAR),
+        "bess_revenue_loss_due_to_capture_rate": result["bess_revenue_loss_due_to_capture_rate_hourly_eur"] if "bess_revenue_loss_due_to_capture_rate_hourly_eur" in result else np.zeros(HOURS_PER_YEAR),
+        "bess_theoretical_revenue_without_capture": result["bess_theoretical_revenue_without_capture_hourly_eur"] if "bess_theoretical_revenue_without_capture_hourly_eur" in result else np.zeros(HOURS_PER_YEAR),
     })
 
     df["month"] = df["datetime"].dt.strftime("%Y-%m")
@@ -2751,13 +2759,17 @@ def app():
         bess_capture_factor = bess_capture_rate_pct / 100.0
 
         pv_spot_price_effective = pv_price_curve_raw * pv_capture_factor
+
+        # BESS Capture Rate represents imperfect monetization of discharge value only.
+        # It reduces BESS sell prices used by the optimizer, but it must not reduce
+        # grid charging prices, PV prices, charging energy, or physical capacity.
         batt_sell_curve_effective = batt_sell_curve_raw * bess_capture_factor
-        grid_buy_curve_effective = grid_buy_curve_raw * bess_capture_factor
+        grid_buy_curve_effective = grid_buy_curve_raw.copy()
 
         afrr_charge_curve_qh_effective = None
         afrr_discharge_curve_qh_effective = None
         if enable_afrr:
-            afrr_charge_curve_qh_effective = afrr_charge_curve_qh_raw * bess_capture_factor
+            afrr_charge_curve_qh_effective = afrr_charge_curve_qh_raw.copy()
             afrr_discharge_curve_qh_effective = afrr_discharge_curve_qh_raw * bess_capture_factor
 
         # 1) TSO/DSO curtailment
@@ -2947,6 +2959,49 @@ def app():
             "pv_commercial_structure_hourly": self_out["pv_commercial_structure_hourly"],
         }
 
+        # BESS Capture Rate reporting
+        # Theoretical revenue uses the same dispatched discharge volumes but the raw, uncaptured sell prices.
+        wholesale_theoretical_revenue_without_capture = final_result["discharge"] * batt_sell_curve_raw
+        wholesale_actual_revenue_with_capture = final_result["batt_sale_revenue"]
+        wholesale_revenue_loss_due_to_capture = (
+            wholesale_theoretical_revenue_without_capture
+            - wholesale_actual_revenue_with_capture
+        )
+
+        afrr_theoretical_revenue_without_capture = np.zeros(HOURS_PER_YEAR, dtype=float)
+        afrr_actual_revenue_with_capture = final_result["afrr_sale_revenue_hourly_eur"] if "afrr_sale_revenue_hourly_eur" in final_result else np.zeros(HOURS_PER_YEAR, dtype=float)
+        if reconciliation is not None and afrr_discharge_curve_qh_raw is not None:
+            afrr_theoretical_revenue_without_capture = (
+                reconciliation["afrr_discharge_qh_mwh"] * afrr_discharge_curve_qh_raw
+            ).reshape(HOURS_PER_YEAR, QH_PER_HOUR).sum(axis=1)
+
+        afrr_revenue_loss_due_to_capture = (
+            afrr_theoretical_revenue_without_capture
+            - afrr_actual_revenue_with_capture
+        )
+
+        bess_theoretical_revenue_without_capture_hourly = (
+            wholesale_theoretical_revenue_without_capture
+            + afrr_theoretical_revenue_without_capture
+        )
+        bess_actual_revenue_with_capture_hourly = (
+            wholesale_actual_revenue_with_capture
+            + afrr_actual_revenue_with_capture
+        )
+        bess_revenue_loss_due_to_capture_hourly = (
+            bess_theoretical_revenue_without_capture_hourly
+            - bess_actual_revenue_with_capture_hourly
+        )
+
+        final_result["bess_theoretical_revenue_without_capture_hourly_eur"] = bess_theoretical_revenue_without_capture_hourly
+        final_result["bess_actual_revenue_with_capture_hourly_eur"] = bess_actual_revenue_with_capture_hourly
+        final_result["bess_revenue_loss_due_to_capture_rate_hourly_eur"] = bess_revenue_loss_due_to_capture_hourly
+        final_result["bess_theoretical_revenue_without_capture_eur"] = np.array([float(np.sum(bess_theoretical_revenue_without_capture_hourly))])
+        final_result["bess_actual_revenue_with_capture_eur"] = np.array([float(np.sum(bess_actual_revenue_with_capture_hourly))])
+        final_result["bess_revenue_loss_due_to_capture_rate_eur"] = np.array([float(np.sum(bess_revenue_loss_due_to_capture_hourly))])
+        final_result["avg_raw_bess_sell_price_eur_per_mwh"] = np.array([float(np.mean(batt_sell_curve_raw))])
+        final_result["avg_effective_bess_sell_price_eur_per_mwh"] = np.array([float(np.mean(batt_sell_curve_effective))])
+
         if reconciliation is not None:
             combined_qh_df = pd.DataFrame({
                 "datetime": reconciliation["datetime_qh"],
@@ -3089,6 +3144,8 @@ def app():
             "battery_soc_mwh_end": combined_soc_hourly_end,
             "pv_direct_revenue_eur": final_result["pv_direct_revenue"],
             "battery_sale_revenue_eur": final_result["batt_sale_revenue"],
+            "bess_theoretical_revenue_without_capture_eur": final_result["bess_theoretical_revenue_without_capture_hourly_eur"],
+            "bess_revenue_loss_due_to_capture_rate_eur": final_result["bess_revenue_loss_due_to_capture_rate_hourly_eur"],
             "grid_charge_cost_eur": final_result["grid_charge_cost"],
             "avg_stored_charge_price_eur_per_mwh": final_result["avg_stored_charge_price"][1:],
             "required_discharge_price_eur_per_mwh": final_result["required_discharge_price"],
@@ -3131,26 +3188,6 @@ def app():
                 hourly_df["battery_discharge_mwh"]
                 + hourly_df["afrr_discharge_mwh"]
             ) / sim_inputs.eta_discharge
-        )
-        # === DEBUG: low-price discharges ===
-        low_price_discharges = hourly_df[
-            (hourly_df["battery_discharge_mwh"] > 1e-6) &
-            (
-                hourly_df["battery_sell_price_effective_eur_per_mwh"]
-                < hourly_df["required_discharge_price_eur_per_mwh"]
-            )
-        ].copy()
-        
-        st.subheader("Low price discharges (below required price)")
-        st.dataframe(
-            low_price_discharges[[
-                "datetime",
-                "battery_discharge_mwh",
-                "battery_sell_price_effective_eur_per_mwh",
-                "required_discharge_price_eur_per_mwh",
-                "avg_stored_charge_price_eur_per_mwh",
-            ]],
-            use_container_width=True
         )
 
         afrr_qh_df = None
