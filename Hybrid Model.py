@@ -469,25 +469,16 @@ def read_afrr_capacity_csv(uploaded_file, year: int) -> np.ndarray:
     return values
     
 def simulate_afrr_capacity(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
-    """Simulate hourly aFRR Capacity awards and revenues.
+    """Legacy threshold-style aFRR capacity selector.
 
-    Capacity reserves availability only: it creates revenue and blocks battery wholesale
-    activity in awarded hours, but it does not move SOC.
+    Kept for backwards compatibility and for fallback when the institutional LP solver
+    is unavailable. The commercial-grade path is optimize_dispatch_institutional_coopt(),
+    which optimizes reserve MW, energy dispatch and SOC headroom simultaneously.
     """
     idx_hourly = pd.date_range(f"{DEFAULT_YEAR}-01-01 00:00:00", periods=HOURS_PER_YEAR, freq="h")
 
     if not inputs.enable_afrr_capacity:
-        return {
-            "afrr_capacity_up_awarded_h": np.zeros(HOURS_PER_YEAR, dtype=int),
-            "afrr_capacity_down_awarded_h": np.zeros(HOURS_PER_YEAR, dtype=int),
-            "afrr_capacity_selected_market_h": np.full(HOURS_PER_YEAR, "none", dtype=object),
-            "afrr_capacity_up_revenue_h_eur": np.zeros(HOURS_PER_YEAR, dtype=float),
-            "afrr_capacity_down_revenue_h_eur": np.zeros(HOURS_PER_YEAR, dtype=float),
-            "afrr_capacity_total_revenue_h_eur": np.zeros(HOURS_PER_YEAR, dtype=float),
-            "afrr_capacity_eligible_h": np.zeros(HOURS_PER_YEAR, dtype=int),
-            "afrr_certified_capacity_up_mw_h": np.zeros(HOURS_PER_YEAR, dtype=float),
-            "afrr_certified_capacity_down_mw_h": np.zeros(HOURS_PER_YEAR, dtype=float),
-        }
+        return _empty_afrr_capacity_result()
 
     if inputs.afrr_capacity_up_price_h is None or inputs.afrr_capacity_down_price_h is None:
         raise ValueError("Les deux courbes Excel aFRR Capacity UP et Down doivent être fournies.")
@@ -495,17 +486,12 @@ def simulate_afrr_capacity(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
     up_price = _validate_array_length(inputs.afrr_capacity_up_price_h, "Prix aFRR Capacity UP", HOURS_PER_YEAR)
     down_price = _validate_array_length(inputs.afrr_capacity_down_price_h, "Prix aFRR Capacity Down", HOURS_PER_YEAR)
 
-    if not (0.0 <= inputs.afrr_certified_capacity_pct <= 100.0):
-        raise ValueError("% of Certified Capacity for aFRR doit être compris entre 0 et 100 %.")
-
     eligible = build_hour_mask(idx_hourly, inputs.afrr_capacity_start_hour, inputs.afrr_capacity_end_hour)
-
     certified_up = float(inputs.afrr_certified_capacity_up_mw)
     certified_down = float(inputs.afrr_certified_capacity_down_mw)
 
     up_revenue_candidate = up_price * certified_up
     down_revenue_candidate = down_price * certified_down
-
     up_ok = eligible & (up_price >= inputs.afrr_capacity_min_price_up_eur_per_mw_h)
     down_ok = eligible & (down_price >= inputs.afrr_capacity_min_price_down_eur_per_mw_h)
 
@@ -513,10 +499,8 @@ def simulate_afrr_capacity(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
     select_up = up_ok & ~down_ok
     select_down = down_ok & ~up_ok
     both = up_ok & down_ok
-
     select_up |= both & (up_revenue_candidate >= down_revenue_candidate)
     select_down |= both & (down_revenue_candidate > up_revenue_candidate)
-
     selected[select_up] = "up"
     selected[select_down] = "down"
 
@@ -537,6 +521,295 @@ def simulate_afrr_capacity(inputs: SimulationInputs) -> Dict[str, np.ndarray]:
         "afrr_certified_capacity_down_mw_h": np.full(HOURS_PER_YEAR, certified_down, dtype=float),
     }
 
+
+def _empty_afrr_capacity_result() -> Dict[str, np.ndarray]:
+    return {
+        "afrr_capacity_up_awarded_h": np.zeros(HOURS_PER_YEAR, dtype=int),
+        "afrr_capacity_down_awarded_h": np.zeros(HOURS_PER_YEAR, dtype=int),
+        "afrr_capacity_selected_market_h": np.full(HOURS_PER_YEAR, "none", dtype=object),
+        "afrr_capacity_up_revenue_h_eur": np.zeros(HOURS_PER_YEAR, dtype=float),
+        "afrr_capacity_down_revenue_h_eur": np.zeros(HOURS_PER_YEAR, dtype=float),
+        "afrr_capacity_total_revenue_h_eur": np.zeros(HOURS_PER_YEAR, dtype=float),
+        "afrr_capacity_eligible_h": np.zeros(HOURS_PER_YEAR, dtype=int),
+        "afrr_certified_capacity_up_mw_h": np.zeros(HOURS_PER_YEAR, dtype=float),
+        "afrr_certified_capacity_down_mw_h": np.zeros(HOURS_PER_YEAR, dtype=float),
+    }
+
+
+def optimize_dispatch_institutional_coopt(inputs: SimulationInputs) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
+    """Institutional-style co-optimization LP for PV + BESS + aFRR capacity.
+
+    This replaces the sequential workflow of: capacity selection -> wholesale DP ->
+    aFRR energy reconciliation. Reserve MW is continuous, partial and co-optimized
+    with wholesale charge/discharge, PV charging, curtailed-PV recovery, expected
+    activation energy, degradation and SOC headroom.
+
+    Mathematical core, for each hour t:
+      max PV_sale + wholesale_discharge + aFRR_capacity + expected_activation
+          - grid_charge_cost - marginal_degradation - restoration/imbalance risk
+      s.t. SOC balance, charge/discharge MW limits, export limit, PV balance,
+           aFRR reserve headroom and annual cycle cap.
+
+    The model is deterministic-equivalent: activation is represented by expected
+    energy using user-provided activation percentages. In production, replace those
+    percentages by calibrated p10/p50/p90 scenario distributions and run the same
+    formulation in a rolling MPC loop.
+    """
+    try:
+        from scipy.optimize import linprog
+    except Exception as exc:
+        raise RuntimeError("SciPy is required for institutional co-optimization LP.") from exc
+
+    T = HOURS_PER_YEAR
+    idx = pd.date_range(f"{DEFAULT_YEAR}-01-01 00:00:00", periods=T, freq="h")
+    pv_sellable = np.maximum(_validate_array_length(inputs.solar_profile, "PV sellable"), 0.0)
+    pv_recoverable = np.zeros(T, dtype=float) if inputs.curtailed_pv_recoverable_mwh is None else np.maximum(_validate_array_length(inputs.curtailed_pv_recoverable_mwh, "PV curtailed recoverable"), 0.0)
+    pv_price = _validate_array_length(inputs.pv_price, "Prix PV")
+    batt_sell = _validate_array_length(inputs.batt_sell_price, "Prix vente BESS")
+    grid_buy = _validate_array_length(inputs.grid_buy_price, "Prix achat réseau")
+
+    if inputs.enable_afrr_capacity:
+        if inputs.afrr_capacity_up_price_h is None or inputs.afrr_capacity_down_price_h is None:
+            raise ValueError("Les courbes aFRR Capacity UP/Down sont nécessaires pour la co-optimisation.")
+        cap_up_price = _validate_array_length(inputs.afrr_capacity_up_price_h, "aFRR Capacity UP", T)
+        cap_down_price = _validate_array_length(inputs.afrr_capacity_down_price_h, "aFRR Capacity Down", T)
+        eligible = build_hour_mask(idx, inputs.afrr_capacity_start_hour, inputs.afrr_capacity_end_hour)
+    else:
+        cap_up_price = np.zeros(T, dtype=float)
+        cap_down_price = np.zeros(T, dtype=float)
+        eligible = np.zeros(T, dtype=bool)
+
+    certified_up = min(float(inputs.afrr_certified_capacity_up_mw), float(inputs.batt_power_mw)) if inputs.enable_afrr_capacity else 0.0
+    certified_down = min(float(inputs.afrr_certified_capacity_down_mw), float(inputs.batt_power_mw)) if inputs.enable_afrr_capacity else 0.0
+    cap_up_price = np.where((eligible) & (cap_up_price >= inputs.afrr_capacity_min_price_up_eur_per_mw_h), cap_up_price, 0.0)
+    cap_down_price = np.where((eligible) & (cap_down_price >= inputs.afrr_capacity_min_price_down_eur_per_mw_h), cap_down_price, 0.0)
+
+    # Expected activation energy factors. Users enter percentages; commercial models
+    # should estimate these from activation history by product, TSO, direction, hour,
+    # season and system imbalance regime.
+    p_up = np.clip(float(inputs.afrr_energy_up_activation_pct) / 100.0, 0.0, 1.0) if inputs.enable_afrr else 0.0
+    p_down = np.clip(float(inputs.afrr_energy_down_activation_pct) / 100.0, 0.0, 1.0) if inputs.enable_afrr else 0.0
+    afrr_up_energy_price = np.zeros(T, dtype=float)
+    afrr_down_energy_price = np.zeros(T, dtype=float)
+    if inputs.enable_afrr and inputs.afrr_discharge_price_qh is not None:
+        afrr_up_energy_price = np.mean(np.asarray(inputs.afrr_discharge_price_qh, dtype=float).reshape(T, QH_PER_HOUR), axis=1)
+    if inputs.enable_afrr and inputs.afrr_charge_price_qh is not None:
+        afrr_down_energy_price = np.mean(np.asarray(inputs.afrr_charge_price_qh, dtype=float).reshape(T, QH_PER_HOUR), axis=1)
+
+    min_soc = inputs.batt_energy_mwh * inputs.min_soc_pct / 100.0
+    max_soc = inputs.batt_energy_mwh * inputs.max_soc_pct / 100.0
+    if min_soc >= max_soc:
+        raise ValueError("SOC min must be lower than SOC max.")
+
+    # Variables per hour: pv_direct, pv_to_batt, curt_to_batt, grid_charge,
+    # discharge, reserve_up, reserve_down. Then SOC[0..T].
+    n_flow = 7 * T
+    n = n_flow + T + 1
+    def v(k, t):
+        return k * T + t
+    def soc_i(t):
+        return n_flow + t
+
+    PV_DIRECT, PV_TO_BATT, CURT_TO_BATT, GRID_CHARGE, DISCHARGE, RES_UP, RES_DOWN = range(7)
+
+    c = np.zeros(n, dtype=float)
+    # linprog minimizes; use negative profit.
+    c[v(PV_DIRECT, 0):v(PV_DIRECT, 0)+T] = -pv_price
+    c[v(DISCHARGE, 0):v(DISCHARGE, 0)+T] = -(batt_sell - inputs.cycle_cost_eur_per_mwh)
+    c[v(GRID_CHARGE, 0):v(GRID_CHARGE, 0)+T] = grid_buy
+    c[v(RES_UP, 0):v(RES_UP, 0)+T] = -(cap_up_price + p_up * (afrr_up_energy_price - inputs.afrr_cycle_cost_eur_per_mwh))
+    # Down activation is battery charging. If the price is positive it is a cost;
+    # if negative it is a paid-to-charge revenue. Add small restoration risk premium.
+    down_restoration_cost = p_down * np.maximum(grid_buy - np.nanmedian(grid_buy), 0.0) * 0.10
+    c[v(RES_DOWN, 0):v(RES_DOWN, 0)+T] = -(cap_down_price - p_down * afrr_down_energy_price - down_restoration_cost)
+
+    bounds = []
+    for t in range(T):
+        bounds.extend([
+            (0.0, pv_sellable[t]),
+            (0.0, pv_sellable[t]),
+            (0.0, pv_recoverable[t]),
+            (0.0, inputs.batt_power_mw),
+            (0.0, inputs.batt_power_mw),
+            (0.0, certified_up),
+            (0.0, certified_down),
+        ])
+    bounds.extend([(min_soc, max_soc) for _ in range(T + 1)])
+
+    A_eq = []
+    b_eq = []
+    row = np.zeros(n); row[soc_i(0)] = 1.0; A_eq.append(row); b_eq.append(float(np.clip(inputs.initial_soc_mwh, min_soc, max_soc)))
+    row = np.zeros(n); row[soc_i(T)] = 1.0; A_eq.append(row); b_eq.append(float(np.clip(inputs.final_soc_mwh, min_soc, max_soc)))
+
+    for t in range(T):
+        row = np.zeros(n)
+        row[soc_i(t + 1)] = 1.0
+        row[soc_i(t)] = -1.0
+        row[v(PV_TO_BATT, t)] = -inputs.eta_charge
+        row[v(CURT_TO_BATT, t)] = -inputs.eta_charge
+        row[v(GRID_CHARGE, t)] = -inputs.eta_charge
+        row[v(DISCHARGE, t)] = 1.0 / max(inputs.eta_discharge, 1e-12)
+        row[v(RES_DOWN, t)] = -p_down * inputs.eta_charge
+        row[v(RES_UP, t)] = p_up / max(inputs.eta_discharge, 1e-12)
+        A_eq.append(row); b_eq.append(0.0)
+
+    A_ub = []
+    b_ub = []
+    for t in range(T):
+        # PV energy balance.
+        row = np.zeros(n); row[v(PV_DIRECT, t)] = 1.0; row[v(PV_TO_BATT, t)] = 1.0
+        A_ub.append(row); b_ub.append(pv_sellable[t])
+        # Charge-side power including downward reserve headroom.
+        row = np.zeros(n); row[v(PV_TO_BATT, t)] = 1.0; row[v(CURT_TO_BATT, t)] = 1.0; row[v(GRID_CHARGE, t)] = 1.0; row[v(RES_DOWN, t)] = 1.0
+        A_ub.append(row); b_ub.append(inputs.batt_power_mw)
+        # Discharge-side power including upward reserve headroom.
+        row = np.zeros(n); row[v(DISCHARGE, t)] = 1.0; row[v(RES_UP, t)] = 1.0
+        A_ub.append(row); b_ub.append(inputs.batt_power_mw)
+        # Export grid limit: PV + wholesale discharge + expected up activation.
+        row = np.zeros(n); row[v(PV_DIRECT, t)] = 1.0; row[v(DISCHARGE, t)] = 1.0; row[v(RES_UP, t)] = p_up
+        A_ub.append(row); b_ub.append(inputs.grid_export_limit_mw)
+        # SOC reserve compliance: enough energy for upward activation.
+        row = np.zeros(n); row[v(RES_UP, t)] = p_up / max(inputs.eta_discharge, 1e-12); row[soc_i(t)] = -1.0
+        A_ub.append(row); b_ub.append(-min_soc)
+        # SOC reserve compliance: enough empty room for downward activation.
+        row = np.zeros(n); row[v(RES_DOWN, t)] = p_down * inputs.eta_charge; row[soc_i(t)] = 1.0
+        A_ub.append(row); b_ub.append(max_soc)
+
+    # Annual degradation / cycle budget. Expected aFRR UP activation consumes cycle budget too.
+    row = np.zeros(n)
+    for t in range(T):
+        row[v(DISCHARGE, t)] = 1.0
+        row[v(RES_UP, t)] = p_up
+    A_ub.append(row); b_ub.append(float(inputs.max_cycles_per_year) * float(inputs.batt_energy_mwh))
+
+    res = linprog(
+        c,
+        A_ub=np.vstack(A_ub), b_ub=np.asarray(b_ub),
+        A_eq=np.vstack(A_eq), b_eq=np.asarray(b_eq),
+        bounds=bounds,
+        method="highs",
+        options={"primal_feasibility_tolerance": 1e-7, "dual_feasibility_tolerance": 1e-7},
+    )
+    if not res.success:
+        raise RuntimeError(f"Institutional co-optimization failed: {res.message}")
+
+    x = res.x
+    pv_direct = x[v(PV_DIRECT, 0):v(PV_DIRECT, 0)+T]
+    pv_to_batt = x[v(PV_TO_BATT, 0):v(PV_TO_BATT, 0)+T]
+    pv_curt_to_batt = x[v(CURT_TO_BATT, 0):v(CURT_TO_BATT, 0)+T]
+    grid_charge = x[v(GRID_CHARGE, 0):v(GRID_CHARGE, 0)+T]
+    discharge = x[v(DISCHARGE, 0):v(DISCHARGE, 0)+T]
+    res_up = x[v(RES_UP, 0):v(RES_UP, 0)+T]
+    res_down = x[v(RES_DOWN, 0):v(RES_DOWN, 0)+T]
+    soc = x[n_flow:n_flow + T + 1]
+
+    expected_up_activation_mwh = res_up * p_up
+    expected_down_activation_mwh = res_down * p_down
+    pv_direct_revenue = pv_direct * pv_price
+    batt_sale_revenue = discharge * batt_sell
+    grid_charge_cost = grid_charge * grid_buy
+    wholesale_cycle_cost = discharge * inputs.cycle_cost_eur_per_mwh
+    afrr_energy_up_revenue_h = expected_up_activation_mwh * afrr_up_energy_price
+    afrr_energy_down_cost_h = expected_down_activation_mwh * afrr_down_energy_price
+    afrr_energy_cycle_cost_h = expected_up_activation_mwh * inputs.afrr_cycle_cost_eur_per_mwh
+
+    selected = np.full(T, "none", dtype=object)
+    selected[(res_up > 1e-6) & (res_down <= 1e-6)] = "up"
+    selected[(res_down > 1e-6) & (res_up <= 1e-6)] = "down"
+    selected[(res_up > 1e-6) & (res_down > 1e-6)] = "both"
+
+    cap_up_revenue = res_up * cap_up_price
+    cap_down_revenue = res_down * cap_down_price
+    cap_result = {
+        "afrr_capacity_up_awarded_h": (res_up > 1e-6).astype(int),
+        "afrr_capacity_down_awarded_h": (res_down > 1e-6).astype(int),
+        "afrr_capacity_selected_market_h": selected,
+        "afrr_capacity_up_revenue_h_eur": cap_up_revenue,
+        "afrr_capacity_down_revenue_h_eur": cap_down_revenue,
+        "afrr_capacity_total_revenue_h_eur": cap_up_revenue + cap_down_revenue,
+        "afrr_capacity_eligible_h": eligible.astype(int),
+        "afrr_certified_capacity_up_mw_h": res_up,
+        "afrr_certified_capacity_down_mw_h": res_down,
+    }
+
+    total_direct_pv_revenue = float(pv_direct_revenue.sum())
+    total_batt_sale_revenue = float(batt_sale_revenue.sum())
+    total_grid_charge_cost = float(grid_charge_cost.sum())
+    total_wholesale_cycle_cost = float(wholesale_cycle_cost.sum())
+    nightly_revenue_total = float(inputs.nightly_bess_revenue_eur * (T // 24))
+    total_afrr_energy_net = float(afrr_energy_up_revenue_h.sum() - afrr_energy_down_cost_h.sum())
+    total_revenue = total_direct_pv_revenue + total_batt_sale_revenue - total_grid_charge_cost + nightly_revenue_total + total_afrr_energy_net
+    total_discharged_mwh = float(discharge.sum() + expected_up_activation_mwh.sum())
+    equivalent_cycles = total_discharged_mwh / max(inputs.batt_energy_mwh, 1e-12)
+
+    result = {
+        "soc": soc,
+        "pv_direct": pv_direct,
+        "pv_to_batt": pv_to_batt,
+        "pv_curtailed_to_battery": pv_curt_to_batt,
+        "grid_charge": grid_charge,
+        "discharge": discharge,
+        "pv_direct_revenue": pv_direct_revenue,
+        "batt_sale_revenue": batt_sale_revenue,
+        "grid_charge_cost": grid_charge_cost,
+        "wholesale_cycle_cost_eur": wholesale_cycle_cost,
+        "total_direct_pv_revenue": np.array([total_direct_pv_revenue]),
+        "total_batt_sale_revenue": np.array([total_batt_sale_revenue]),
+        "total_grid_charge_cost": np.array([total_grid_charge_cost]),
+        "total_wholesale_cycle_cost_eur": np.array([total_wholesale_cycle_cost]),
+        "gross_bess_revenue_before_cycle_cost_eur": np.array([total_batt_sale_revenue + total_afrr_energy_net]),
+        "net_bess_revenue_after_cycle_cost_eur": np.array([total_batt_sale_revenue - total_grid_charge_cost + nightly_revenue_total + total_afrr_energy_net]),
+        "bess_cash_revenue_eur": np.array([total_batt_sale_revenue - total_grid_charge_cost + nightly_revenue_total + total_afrr_energy_net]),
+        "nightly_revenue_total": np.array([nightly_revenue_total]),
+        "total_revenue": np.array([total_revenue]),
+        "equivalent_cycles": np.array([equivalent_cycles]),
+        "energy_sold_total_mwh": np.array([float(pv_direct.sum() + discharge.sum() + expected_up_activation_mwh.sum())]),
+        "energy_shifted_mwh": np.array([total_discharged_mwh]),
+        "max_cycles_per_year": np.array([float(inputs.max_cycles_per_year)]),
+        "annual_discharge_cap_mwh": np.array([float(inputs.max_cycles_per_year) * float(inputs.batt_energy_mwh)]),
+        "remaining_cycle_budget_mwh": np.array([max(float(inputs.max_cycles_per_year) * float(inputs.batt_energy_mwh) - total_discharged_mwh, 0.0)]),
+        "annual_cycle_budget_penalty_eur_per_mwh": np.array([0.0]),
+        "pv_direct_sold_mwh": np.array([float(pv_direct.sum())]),
+        "avg_stored_charge_price": np.full(T + 1, np.nan),
+        "required_discharge_price": np.full(T, np.nan),
+        "hourly_datetime": idx,
+        "required_discharge_price_gate_estimate": np.full(T, np.nan),
+        "afrr_capacity_selected_market_h": selected,
+        "battery_blocked_by_afrr_capacity": np.zeros(T, dtype=int),
+        "cooptimization_mode": np.array(["institutional_lp_expected_activation"]),
+        "afrr_reserve_up_mw_h": res_up,
+        "afrr_reserve_down_mw_h": res_down,
+        "afrr_expected_up_activation_mwh_h": expected_up_activation_mwh,
+        "afrr_expected_down_activation_mwh_h": expected_down_activation_mwh,
+        "afrr_expected_up_energy_revenue_h_eur": afrr_energy_up_revenue_h,
+        "afrr_expected_down_energy_cost_h_eur": afrr_energy_down_cost_h,
+        "afrr_expected_activation_cycle_cost_h_eur": afrr_energy_cycle_cost_h,
+        "afrr_expected_energy_net_revenue_h_eur": afrr_energy_up_revenue_h - afrr_energy_down_cost_h,
+        "total_afrr_expected_energy_net_revenue_eur": np.array([total_afrr_energy_net]),
+        "soc_headroom_up_mwh": np.maximum(soc[:-1] - min_soc, 0.0),
+        "soc_headroom_down_mwh": np.maximum(max_soc - soc[:-1], 0.0),
+        "solver_objective_eur": np.array([-float(res.fun)]),
+    }
+    return result, cap_result
+
+
+def optimize_dispatch_best_available(inputs: SimulationInputs) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], bool]:
+    """Run institutional co-optimization when ancillary capacity is enabled; otherwise legacy DP.
+
+    Returns (dispatch_result, capacity_result, used_institutional_cooptimization).
+    """
+    if inputs.enable_afrr_capacity:
+        try:
+            result, cap_result = optimize_dispatch_institutional_coopt(inputs)
+            return result, cap_result, True
+        except Exception as exc:
+            st.warning(
+                "Co-optimisation institutionnelle indisponible; retour au moteur DP historique. "
+                f"Détail: {exc}"
+            )
+    cap_result = simulate_afrr_capacity(inputs)
+    inputs.afrr_capacity_selected_market_h = cap_result["afrr_capacity_selected_market_h"]
+    return optimize_dispatch_dp(inputs), cap_result, False
 
 def build_standard_france_solar_profile() -> np.ndarray:
     idx = pd.date_range(f"{DEFAULT_YEAR}-01-01 00:00:00", periods=HOURS_PER_YEAR, freq="h")
@@ -3009,27 +3282,23 @@ def app():
             degraded_bess_energy_by_year_mwh=degraded_bess_energy_by_year_mwh,
         )
 
-        # aFRR Capacity is simulated before wholesale dispatch because awarded hours block
-        # the battery from wholesale charge/discharge. Capacity itself does not change SOC.
-        afrr_capacity_result = simulate_afrr_capacity(sim_inputs)
-        sim_inputs.afrr_capacity_selected_market_h = afrr_capacity_result["afrr_capacity_selected_market_h"]
-
         inputs_df = build_inputs_dataframe(sim_inputs)
 
-        with st.spinner("Optimisation économique annuelle en cours..."):
-            result = optimize_dispatch_dp(sim_inputs)
+        with st.spinner("Co-optimisation économique annuelle en cours..."):
+            result, afrr_capacity_result, used_institutional_coopt = optimize_dispatch_best_available(sim_inputs)
 
         afrr_result = None
         reconciliation = None
         final_result = result
 
-        if sim_inputs.enable_afrr:
+        if sim_inputs.enable_afrr and not used_institutional_coopt:
             with st.spinner("Simulation aFRR quart-horaire de nuit en cours..."):
                 afrr_result = simulate_afrr_night_arbitrage(sim_inputs, result)
                 reconciliation = reconcile_wholesale_afrr_dispatch_qh(result_hourly=result, afrr_result=afrr_result, inputs=sim_inputs)
                 final_result = build_final_result_after_market_arbitration(base_result=result, reconciliation=reconciliation, inputs=sim_inputs)
 
         final_result = add_afrr_capacity_to_final_result(final_result, afrr_capacity_result)
+        final_result["used_institutional_cooptimization"] = np.array([bool(used_institutional_coopt)])
 
         # Recompute actual curtailed PV recovered AFTER final dispatch/reconciliation
         pv_curtailed_to_battery_actual = final_result.get(
@@ -3119,9 +3388,8 @@ def app():
                     cycle_cost_eur_per_mwh=0.0,
                     afrr_cycle_cost_eur_per_mwh=0.0,
                 )
-                no_cycle_inputs.afrr_capacity_selected_market_h = sim_inputs.afrr_capacity_selected_market_h
-                no_cycle_result = optimize_dispatch_dp(no_cycle_inputs)
-                if no_cycle_inputs.enable_afrr:
+                no_cycle_result, no_cycle_capacity_result, no_cycle_used_coopt = optimize_dispatch_best_available(no_cycle_inputs)
+                if no_cycle_inputs.enable_afrr and not no_cycle_used_coopt:
                     no_cycle_afrr_result = simulate_afrr_night_arbitrage(no_cycle_inputs, no_cycle_result)
                     no_cycle_reconciliation = reconcile_wholesale_afrr_dispatch_qh(
                         result_hourly=no_cycle_result,
@@ -3135,7 +3403,7 @@ def app():
                     )
                 else:
                     no_cycle_final = no_cycle_result
-                no_cycle_final = add_afrr_capacity_to_final_result(no_cycle_final, afrr_capacity_result)
+                no_cycle_final = add_afrr_capacity_to_final_result(no_cycle_final, no_cycle_capacity_result if 'no_cycle_capacity_result' in locals() else afrr_capacity_result)
                 final_result["equivalent_cycles_without_cycle_cost"] = np.array([float(no_cycle_final["equivalent_cycles"][0])])
                 final_result["energy_shifted_without_cycle_cost_mwh"] = np.array([float(no_cycle_final["energy_shifted_mwh"][0])])
             else:
