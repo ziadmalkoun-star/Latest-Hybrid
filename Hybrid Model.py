@@ -2270,7 +2270,7 @@ def app():
         st.subheader("BESS Parameters")
         batt_power_mw = st.number_input("BESS Usable Power (MW)", min_value=0.0, value=50.0, step=1.0)
         batt_energy_mwh = st.number_input("BESS Usable Capacity (MWh)", min_value=0.0, value=200.0, step=1.0)
-        bess_availability_pct = st.number_input("BESS Availability (%)", min_value=0.0, max_value=100.0, value=98.0, step=0.1)
+        bess_availability_pct = st.number_input("BESS Availability (%)", min_value=0.0, max_value=100.0, value=100.0, step=0.1)
         effective_batt_energy_mwh = batt_energy_mwh * bess_availability_pct / 100.0
         st.caption(f"Effective BESS usable capacity: {effective_batt_energy_mwh:.2f} MWh")
         eta_charge = st.number_input("BESS Charging Efficiency (%)", min_value=1.0, max_value=100.0, value=95.0, step=0.5) / 100.0
@@ -2291,13 +2291,13 @@ def app():
         st.subheader("PV Parameters")
         pv_dc_mw = st.number_input("PV DC Power (MWc)", min_value=0.0, value=100.0, step=1.0)
         productible = st.number_input("PV Yield (kWh/kWc/an)", min_value=0.0, value=1200.0, step=10.0)
+        availability_pct = st.number_input("PV Availability (%)", min_value=0.0, max_value=100.0, value=100.0, step=0.1)
         pv_losses_pct = st.number_input("PV System Losses (%)", min_value=0.0, max_value=100.0, value=8.0, step=0.5)
         pv_capture_rate_pct = st.number_input("PV Capture Rate (%)", min_value=0.0, max_value=100.0, value=100.0, step=1.0)
         
     with col3:
         st.subheader("General Parameters")
         project_lifetime_years = int(st.number_input("Project Lifetime (years)", min_value=1, value=1, step=1))
-        availability_pct = st.number_input("Power Plant Availability (%)", min_value=0.0, max_value=100.0, value=98.0, step=0.1)
         grid_export_limit_mw = st.number_input("Grid Injection Limit (MW)", min_value=0.0, value=100.0, step=1.0)
         soc_steps = st.slider("SOC Steps for Optimization", min_value=21, max_value=201, value=51, step=10)
 
