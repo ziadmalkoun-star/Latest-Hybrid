@@ -3234,6 +3234,7 @@ def app():
             "bess_theoretical_revenue_without_capture_eur": final_result["bess_theoretical_revenue_without_capture_hourly_eur"],
             "bess_revenue_loss_due_to_capture_rate_eur": final_result["bess_revenue_loss_due_to_capture_rate_hourly_eur"],
             "grid_charge_cost_eur": final_result["grid_charge_cost"],
+            "wholesale_cycle_cost_eur": final_result["wholesale_cycle_cost_eur"] if "wholesale_cycle_cost_eur" in final_result else np.zeros(HOURS_PER_YEAR),
             "avg_stored_charge_price_eur_per_mwh": final_result["avg_stored_charge_price"][1:],
             "required_discharge_price_eur_per_mwh": final_result["required_discharge_price"],
             "required_discharge_price_gate_estimate_eur_per_mwh": final_result["required_discharge_price_gate_estimate"],
